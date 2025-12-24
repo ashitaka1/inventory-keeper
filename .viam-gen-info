@@ -1,0 +1,13 @@
+{
+  "module_name": "inventory-keeper",
+  "namespace": "viamdemo",
+  "language": "go",
+  "resource_type": "service",
+  "resource_subtype": "generic",
+  "model_name": "keeper",
+  "enable_cloud_build": false,
+  "initialize_git": false,
+  "generator_version": "0.1.0",
+  "generated_on": "2025-12-23T20:42:16.808647Z",
+  "module_readme_link": "README.md"
+}

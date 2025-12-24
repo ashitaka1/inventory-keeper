@@ -1,0 +1,22 @@
+{
+  "$schema": "https://dl.viam.dev/module.schema.json",
+  "module_id": "viamdemo:inventory-keeper",
+  "visibility": "private",
+  "url": "",
+  "description": "Modular generic service: keeper",
+  "applications": null,
+  "markdown_link": "README.md",
+  "entrypoint": "bin/inventory-keeper",
+  "first_run": "",
+  "build": {
+    "build": "make module.tar.gz",
+    "setup": "make setup",
+    "path": "module.tar.gz",
+    "arch": [
+      "linux/amd64",
+      "linux/arm64",
+      "darwin/arm64",
+      "windows/amd64"
+    ]
+  }
+}
