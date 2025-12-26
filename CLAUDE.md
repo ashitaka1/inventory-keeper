@@ -19,7 +19,17 @@ Viam module for automated shelf inventory tracking using QR codes and facial rec
 - Tests with mock camera
 - Module builds successfully
 
-**Next: Phase 2** - QR Code Generation
+**Phase 2 Complete** ✅ - QR Code Generation
+- `generate_qr` DoCommand handler
+- Returns base64-encoded PNG QR codes
+- ItemQRData struct (item_id, item_name)
+- Comprehensive test coverage
+
+**Phase 3 In Progress** 🔄 - QR Detection
+- Vision service integration complete
+- Config field `qr_vision_service` with validation
+- Tests updated with mock vision service
+- **Next**: Continuous monitoring with DEBUG logging
 
 ## Commands
 
@@ -46,7 +56,9 @@ Standard Viam module generated with `viam module generate`:
 
 ```go
 type Config struct {
-    CameraName string `json:"camera_name"` // Required
+    CameraName      string `json:"camera_name"`       // Required
+    QRVisionService string `json:"qr_vision_service"` // Required
+    ScanIntervalMs  int    `json:"scan_interval_ms"`  // Optional, defaults to 1000ms (future)
 }
 ```
 
@@ -58,6 +70,7 @@ Current commands:
 ```json
 {"command": "ping"}
 {"command": "echo", "message": "hello"}
+{"command": "generate_qr", "item_id": "item-001", "item_name": "Apple"}
 ```
 
 All JSON fields available in `cmd map[string]interface{}`. Use `"command"` for routing, other fields are handler-specific arguments.
@@ -65,8 +78,10 @@ All JSON fields available in `cmd map[string]interface{}`. Use `"command"` for r
 ### Testing
 
 - Use `inject.Camera` for mocking cameras
+- Use `inject.NewVisionService()` for mocking vision services
 - Use `logging.NewTestLogger(t)` for logging
 - Write tests FIRST (TDD approach)
+- All tests must pass before committing
 
 ## Development Principles
 
@@ -75,12 +90,14 @@ All JSON fields available in `cmd map[string]interface{}`. Use `"command"` for r
 3. **Config Matches Features**: Only require dependencies we use
 4. **Always Working**: Never break existing functionality
 5. **Mock Wisely**: Mock complex integrations, not trivial operations
+6. **Minimal Data Structures**: Only add fields for features we've directly discussed - no speculative fields during prototyping
+7. **Hardware-First**: Test hardware/services in Viam UI before writing code
 
 ## Roadmap to MVP
 
 1. ✅ **Camera Access** - Access camera from config
-2. **QR Generation** - Generate codes for items
-3. **QR Detection** - Scan codes with vision service
+2. ✅ **QR Generation** - Generate codes for items
+3. 🔄 **QR Detection** - Scan codes with vision service (in progress)
 4. **Inventory + Checkout** ← **MVP** - Track items, basic checkout
 
 After MVP: Face recognition, state machine, alerts
@@ -94,15 +111,23 @@ After MVP: Face recognition, state machine, alerts
     "name": "inventory-keeper",
     "executable_path": "/path/to/bin/inventory-keeper"
   }],
-  "services": [{
-    "name": "inventory",
-    "namespace": "rdk",
-    "type": "generic",
-    "model": "viamdemo:inventory-keeper:keeper",
-    "attributes": {
-      "camera_name": "your-camera-name"
+  "services": [
+    {
+      "name": "qr-detector",
+      "type": "vision",
+      "model": "viam:vision:pyzbar"
+    },
+    {
+      "name": "inventory",
+      "namespace": "rdk",
+      "type": "generic",
+      "model": "viamdemo:inventory-keeper:keeper",
+      "attributes": {
+        "camera_name": "your-camera-name",
+        "qr_vision_service": "qr-detector"
+      }
     }
-  }]
+  ]
 }
 ```
 
@@ -110,5 +135,5 @@ After MVP: Face recognition, state machine, alerts
 
 - **Dev**: macOS with viam-server, webcams available
 - **Target**: Raspberry Pi 5 deployment
-- **Vision**: Will configure when Phase 3 starts
+- **Vision**: pyzbar QR detector (custom fork in ../viam-qrcode)
 - **Faces**: Will use data capture + ML training (Phases 5-6)

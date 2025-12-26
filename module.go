@@ -2,19 +2,30 @@ package inventorykeeper
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 
+	"github.com/skip2/go-qrcode"
 	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
 	generic "go.viam.com/rdk/services/generic"
+	"go.viam.com/rdk/services/vision"
 )
 
 var (
 	Keeper           = resource.NewModel("viamdemo", "inventory-keeper", "keeper")
 	errUnimplemented = errors.New("unimplemented")
 )
+
+// ItemQRData represents the data encoded in a QR code for an inventory item
+// Fields are added only as features require them - start minimal
+type ItemQRData struct {
+	ItemID   string `json:"item_id"`
+	ItemName string `json:"item_name"`
+}
 
 func init() {
 	resource.RegisterService(generic.API, Keeper,
@@ -28,10 +39,12 @@ type Config struct {
 	// Camera for capturing images of the shelf
 	CameraName string `json:"camera_name"`
 
+	// Vision service for QR detection
+	QRVisionService string `json:"qr_vision_service"`
+
 	// Future config fields will be added incrementally as features are implemented:
-	// - Vision service for QR detection
+	// - Vision service for facial recognition
 	// - Face camera for person detection
-	// - ML model service for facial recognition
 	// - Optional integrations (streamdeck, slack_webhook_url)
 	// - Timing configuration (check_in_delay_seconds, theft_alert_delay_seconds)
 }
@@ -52,8 +65,13 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 		return nil, nil, errors.New("camera_name is required")
 	}
 
-	// Return camera as required dependency
-	required := []string{cfg.CameraName}
+	// Validate required QR vision service field
+	if cfg.QRVisionService == "" {
+		return nil, nil, errors.New("qr_vision_service is required")
+	}
+
+	// Return both camera and QR vision service as required dependencies
+	required := []string{cfg.CameraName, cfg.QRVisionService}
 	return required, nil, nil
 }
 
@@ -65,7 +83,8 @@ type inventoryKeeperKeeper struct {
 	logger logging.Logger
 	cfg    *Config
 
-	camera camera.Camera // Camera for shelf monitoring
+	camera          camera.Camera  // Camera for shelf monitoring
+	qrVisionService vision.Service // Vision service for QR detection
 
 	cancelCtx  context.Context
 	cancelFunc func()
@@ -91,16 +110,23 @@ func NewKeeper(ctx context.Context, deps resource.Dependencies, name resource.Na
 		return nil, fmt.Errorf("failed to get camera %s: %w", conf.CameraName, err)
 	}
 
-	s := &inventoryKeeperKeeper{
-		name:       name,
-		logger:     logger,
-		cfg:        conf,
-		camera:     cam,
-		cancelCtx:  cancelCtx,
-		cancelFunc: cancelFunc,
+	// Get the QR vision service from dependencies
+	qrVis, err := vision.FromDependencies(deps, conf.QRVisionService)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get QR vision service %s: %w", conf.QRVisionService, err)
 	}
 
-	logger.Infof("Inventory keeper initialized with camera: %s", conf.CameraName)
+	s := &inventoryKeeperKeeper{
+		name:            name,
+		logger:          logger,
+		cfg:             conf,
+		camera:          cam,
+		qrVisionService: qrVis,
+		cancelCtx:       cancelCtx,
+		cancelFunc:      cancelFunc,
+	}
+
+	logger.Infof("Inventory keeper initialized with camera: %s, QR vision service: %s", conf.CameraName, conf.QRVisionService)
 	return s, nil
 }
 
@@ -128,6 +154,10 @@ func (s *inventoryKeeperKeeper) DoCommand(ctx context.Context, cmd map[string]in
 		// Simple echo command for testing - returns what was sent
 		return s.handleEcho(ctx, cmd)
 
+	case "generate_qr":
+		// Generate QR code for an inventory item
+		return s.handleGenerateQR(ctx, cmd)
+
 	default:
 		return nil, fmt.Errorf("unknown command: %s", cmdType)
 	}
@@ -147,6 +177,54 @@ func (s *inventoryKeeperKeeper) handleEcho(ctx context.Context, cmd map[string]i
 		"command": "echo",
 		"message": message,
 		"status":  "success",
+	}, nil
+}
+
+// handleGenerateQR generates a QR code for an inventory item
+func (s *inventoryKeeperKeeper) handleGenerateQR(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+	s.logger.Info("Generate QR command received")
+
+	// Extract required fields
+	itemID, ok := cmd["item_id"].(string)
+	if !ok || itemID == "" {
+		return nil, errors.New("item_id is required and must be a string")
+	}
+
+	itemName, ok := cmd["item_name"].(string)
+	if !ok || itemName == "" {
+		return nil, errors.New("item_name is required and must be a string")
+	}
+
+	// Create QR data structure (minimal - only what we need now)
+	qrData := ItemQRData{
+		ItemID:   itemID,
+		ItemName: itemName,
+	}
+
+	// Encode data as JSON
+	jsonData, err := json.Marshal(qrData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode QR data: %w", err)
+	}
+
+	// Generate QR code (256x256 pixels, medium recovery level)
+	qrCode, err := qrcode.Encode(string(jsonData), qrcode.Medium, 256)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate QR code: %w", err)
+	}
+
+	// Encode as base64 for easy transmission
+	qrBase64 := base64.StdEncoding.EncodeToString(qrCode)
+
+	s.logger.Infof("Generated QR code for item: %s", itemID)
+
+	return map[string]interface{}{
+		"item_id":   itemID,
+		"item_name": itemName,
+		"qr_code":   qrBase64,
+		"qr_data":   string(jsonData), // Include the encoded data for reference
+		"format":    "base64-png",
+		"size":      256,
 	}, nil
 }
 
