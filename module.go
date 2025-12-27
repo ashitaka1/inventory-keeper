@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/skip2/go-qrcode"
 	"go.viam.com/rdk/components/camera"
@@ -27,6 +29,15 @@ type ItemQRData struct {
 	ItemName string `json:"item_name"`
 }
 
+// DetectedQRCode tracks a QR code that's currently visible in the camera view
+type DetectedQRCode struct {
+	Content   string    // Raw QR code content
+	ItemID    string    // Parsed item_id (if content is ItemQRData JSON)
+	ItemName  string    // Parsed item_name (if content is ItemQRData JSON)
+	FirstSeen time.Time // When this code was first detected
+	LastSeen  time.Time // Last time this code was seen
+}
+
 func init() {
 	resource.RegisterService(generic.API, Keeper,
 		resource.Registration[resource.Resource, *Config]{
@@ -41,6 +52,9 @@ type Config struct {
 
 	// Vision service for QR detection
 	QRVisionService string `json:"qr_vision_service"`
+
+	// Scan interval in milliseconds (optional, defaults to 1000ms)
+	ScanIntervalMs int `json:"scan_interval_ms"`
 
 	// Future config fields will be added incrementally as features are implemented:
 	// - Vision service for facial recognition
@@ -86,6 +100,10 @@ type inventoryKeeperKeeper struct {
 	camera          camera.Camera  // Camera for shelf monitoring
 	qrVisionService vision.Service // Vision service for QR detection
 
+	// QR code monitoring state
+	visibleCodes map[string]*DetectedQRCode // Keyed by QR content
+	monitorMu    sync.Mutex                  // Protects visibleCodes
+
 	cancelCtx  context.Context
 	cancelFunc func()
 }
@@ -122,9 +140,13 @@ func NewKeeper(ctx context.Context, deps resource.Dependencies, name resource.Na
 		cfg:             conf,
 		camera:          cam,
 		qrVisionService: qrVis,
+		visibleCodes:    make(map[string]*DetectedQRCode),
 		cancelCtx:       cancelCtx,
 		cancelFunc:      cancelFunc,
 	}
+
+	// Start background monitoring
+	s.startMonitoring()
 
 	logger.Infof("Inventory keeper initialized with camera: %s, QR vision service: %s", conf.CameraName, conf.QRVisionService)
 	return s, nil
@@ -226,6 +248,109 @@ func (s *inventoryKeeperKeeper) handleGenerateQR(ctx context.Context, cmd map[st
 		"format":    "base64-png",
 		"size":      256,
 	}, nil
+}
+
+// startMonitoring starts the background QR code monitoring loop
+func (s *inventoryKeeperKeeper) startMonitoring() {
+	// Determine scan interval
+	interval := time.Duration(s.cfg.ScanIntervalMs) * time.Millisecond
+	if interval == 0 {
+		interval = 1 * time.Second // Default to 1 second
+	}
+
+	s.logger.Debugf("Starting QR code monitoring with interval: %v", interval)
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-s.cancelCtx.Done():
+				s.logger.Debug("QR code monitoring stopped")
+				return
+			case <-ticker.C:
+				s.scanAndCompare(s.cancelCtx)
+			}
+		}
+	}()
+}
+
+// scanAndCompare performs a single scan for QR codes and compares to previous state
+func (s *inventoryKeeperKeeper) scanAndCompare(ctx context.Context) {
+	// Get detections from vision service
+	detections, err := s.qrVisionService.DetectionsFromCamera(ctx, s.cfg.CameraName, nil)
+	if err != nil {
+		s.logger.Warnf("Failed to scan QR codes: %v", err)
+		return
+	}
+
+	// Track currently detected codes
+	currentCodes := make(map[string]*DetectedQRCode)
+	now := time.Now()
+
+	// Process each detection
+	for _, detection := range detections {
+		content := detection.Label()
+
+		// Try to parse as ItemQRData JSON
+		var itemData ItemQRData
+		itemID := ""
+		itemName := ""
+		if err := json.Unmarshal([]byte(content), &itemData); err == nil {
+			// Successfully parsed as ItemQRData
+			itemID = itemData.ItemID
+			itemName = itemData.ItemName
+		}
+
+		// Check if this is a new code (appearance)
+		s.monitorMu.Lock()
+		existingCode, exists := s.visibleCodes[content]
+		s.monitorMu.Unlock()
+
+		if !exists {
+			// New code appeared
+			if itemID != "" {
+				s.logger.Debugf("QR code appeared: %s (%s)", itemID, itemName)
+			} else {
+				s.logger.Debugf("QR code appeared: unknown content - %s", content)
+			}
+		}
+
+		// Create or update the detected code
+		code := &DetectedQRCode{
+			Content:  content,
+			ItemID:   itemID,
+			ItemName: itemName,
+			LastSeen: now,
+		}
+
+		if existingCode != nil {
+			// Preserve FirstSeen timestamp
+			code.FirstSeen = existingCode.FirstSeen
+		} else {
+			code.FirstSeen = now
+		}
+
+		currentCodes[content] = code
+	}
+
+	// Find codes that disappeared (in visibleCodes but not in currentCodes)
+	s.monitorMu.Lock()
+	for content, code := range s.visibleCodes {
+		if _, stillVisible := currentCodes[content]; !stillVisible {
+			// Code disappeared
+			if code.ItemID != "" {
+				s.logger.Debugf("QR code disappeared: %s (%s)", code.ItemID, code.ItemName)
+			} else {
+				s.logger.Debugf("QR code disappeared: unknown content - %s", content)
+			}
+		}
+	}
+
+	// Update visible codes map
+	s.visibleCodes = currentCodes
+	s.monitorMu.Unlock()
 }
 
 func (s *inventoryKeeperKeeper) Close(context.Context) error {

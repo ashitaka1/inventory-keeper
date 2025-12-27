@@ -25,11 +25,13 @@ Viam module for automated shelf inventory tracking using QR codes and facial rec
 - ItemQRData struct (item_id, item_name)
 - Comprehensive test coverage
 
-**Phase 3 In Progress** 🔄 - QR Detection
-- Vision service integration complete
+**Phase 3 Complete** ✅ - QR Detection
+- Vision service integration with pyzbar
 - Config field `qr_vision_service` with validation
-- Tests updated with mock vision service
-- **Next**: Continuous monitoring with DEBUG logging
+- Continuous monitoring with background goroutine
+- DEBUG logging for QR code appearance/disappearance
+- State tracking with DetectedQRCode
+- Optional `scan_interval_ms` config (defaults to 1000ms)
 
 ## Commands
 
@@ -58,7 +60,7 @@ Standard Viam module generated with `viam module generate`:
 type Config struct {
     CameraName      string `json:"camera_name"`       // Required
     QRVisionService string `json:"qr_vision_service"` // Required
-    ScanIntervalMs  int    `json:"scan_interval_ms"`  // Optional, defaults to 1000ms (future)
+    ScanIntervalMs  int    `json:"scan_interval_ms"`  // Optional, defaults to 1000ms
 }
 ```
 
@@ -97,7 +99,7 @@ All JSON fields available in `cmd map[string]interface{}`. Use `"command"` for r
 
 1. ✅ **Camera Access** - Access camera from config
 2. ✅ **QR Generation** - Generate codes for items
-3. 🔄 **QR Detection** - Scan codes with vision service (in progress)
+3. ✅ **QR Detection** - Scan codes with vision service, continuous monitoring
 4. **Inventory + Checkout** ← **MVP** - Track items, basic checkout
 
 After MVP: Face recognition, state machine, alerts

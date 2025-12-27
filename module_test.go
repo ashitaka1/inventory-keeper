@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"image"
 	"testing"
 
 	"go.viam.com/rdk/components/camera"
@@ -12,6 +14,7 @@ import (
 	"go.viam.com/rdk/services/generic"
 	"go.viam.com/rdk/services/vision"
 	"go.viam.com/rdk/testutils/inject"
+	"go.viam.com/rdk/vision/objectdetection"
 )
 
 func TestConfigValidate(t *testing.T) {
@@ -237,5 +240,221 @@ func TestGenerateQR(t *testing.T) {
 		if err == nil {
 			t.Error("expected error for empty item_id")
 		}
+	})
+}
+
+func TestScanAndCompare(t *testing.T) {
+	ctx := context.Background()
+	logger := logging.NewTestLogger(t)
+	cfg := &Config{
+		CameraName:      "test-camera",
+		QRVisionService: "test-qr-vision",
+	}
+
+	mockCam := &inject.Camera{}
+	mockVision := inject.NewVisionService("test-qr-vision")
+	deps := resource.Dependencies{
+		camera.Named("test-camera"):    mockCam,
+		vision.Named("test-qr-vision"): mockVision,
+	}
+
+	keeper, err := NewKeeper(ctx, deps, resource.NewName(generic.API, "test"), cfg, logger)
+	if err != nil {
+		t.Fatalf("failed to create keeper: %v", err)
+	}
+	defer keeper.Close(ctx)
+
+	svc := keeper.(*inventoryKeeperKeeper)
+
+	t.Run("detects new QR code with ItemQRData", func(t *testing.T) {
+		// Create ItemQRData JSON
+		qrData := ItemQRData{ItemID: "item-001", ItemName: "Apple"}
+		jsonData, _ := json.Marshal(qrData)
+
+		// Mock vision service to return one detection
+		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{
+				objectdetection.NewDetection(
+					image.Rectangle{Min: image.Point{X: 10, Y: 10}, Max: image.Point{X: 100, Y: 100}},
+					1.0,
+					string(jsonData),
+				),
+			}, nil
+		}
+
+		// Call scanAndCompare
+		svc.scanAndCompare(ctx)
+
+		// Verify code was added to visibleCodes
+		svc.monitorMu.Lock()
+		defer svc.monitorMu.Unlock()
+
+		if len(svc.visibleCodes) != 1 {
+			t.Errorf("expected 1 visible code, got: %d", len(svc.visibleCodes))
+		}
+
+		code, ok := svc.visibleCodes[string(jsonData)]
+		if !ok {
+			t.Fatal("expected code to be in visibleCodes map")
+		}
+
+		if code.ItemID != "item-001" {
+			t.Errorf("expected ItemID 'item-001', got: %s", code.ItemID)
+		}
+		if code.ItemName != "Apple" {
+			t.Errorf("expected ItemName 'Apple', got: %s", code.ItemName)
+		}
+		if code.Content != string(jsonData) {
+			t.Errorf("expected Content to match JSON data")
+		}
+	})
+
+	t.Run("detects new QR code with unknown content", func(t *testing.T) {
+		// Clear previous state
+		svc.monitorMu.Lock()
+		svc.visibleCodes = make(map[string]*DetectedQRCode)
+		svc.monitorMu.Unlock()
+
+		unknownContent := "https://example.com"
+
+		// Mock vision service to return unknown QR code
+		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{
+				objectdetection.NewDetection(
+					image.Rectangle{Min: image.Point{X: 10, Y: 10}, Max: image.Point{X: 100, Y: 100}},
+					1.0,
+					unknownContent,
+				),
+			}, nil
+		}
+
+		// Call scanAndCompare
+		svc.scanAndCompare(ctx)
+
+		// Verify code was added
+		svc.monitorMu.Lock()
+		defer svc.monitorMu.Unlock()
+
+		if len(svc.visibleCodes) != 1 {
+			t.Errorf("expected 1 visible code, got: %d", len(svc.visibleCodes))
+		}
+
+		code, ok := svc.visibleCodes[unknownContent]
+		if !ok {
+			t.Fatal("expected code to be in visibleCodes map")
+		}
+
+		if code.ItemID != "" {
+			t.Errorf("expected empty ItemID for unknown content, got: %s", code.ItemID)
+		}
+		if code.ItemName != "" {
+			t.Errorf("expected empty ItemName for unknown content, got: %s", code.ItemName)
+		}
+		if code.Content != unknownContent {
+			t.Errorf("expected Content '%s', got: %s", unknownContent, code.Content)
+		}
+	})
+
+	t.Run("detects code disappearance", func(t *testing.T) {
+		// Setup: Add a code to visibleCodes
+		qrData := ItemQRData{ItemID: "item-002", ItemName: "Banana"}
+		jsonData, _ := json.Marshal(qrData)
+
+		svc.monitorMu.Lock()
+		svc.visibleCodes = map[string]*DetectedQRCode{
+			string(jsonData): {
+				Content:  string(jsonData),
+				ItemID:   "item-002",
+				ItemName: "Banana",
+			},
+		}
+		svc.monitorMu.Unlock()
+
+		// Mock vision service to return empty detections (code disappeared)
+		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{}, nil
+		}
+
+		// Call scanAndCompare
+		svc.scanAndCompare(ctx)
+
+		// Verify code was removed
+		svc.monitorMu.Lock()
+		defer svc.monitorMu.Unlock()
+
+		if len(svc.visibleCodes) != 0 {
+			t.Errorf("expected 0 visible codes after disappearance, got: %d", len(svc.visibleCodes))
+		}
+	})
+
+	t.Run("handles multiple QR codes", func(t *testing.T) {
+		// Clear state
+		svc.monitorMu.Lock()
+		svc.visibleCodes = make(map[string]*DetectedQRCode)
+		svc.monitorMu.Unlock()
+
+		// Create two ItemQRData codes
+		qrData1 := ItemQRData{ItemID: "item-001", ItemName: "Apple"}
+		jsonData1, _ := json.Marshal(qrData1)
+
+		qrData2 := ItemQRData{ItemID: "item-002", ItemName: "Banana"}
+		jsonData2, _ := json.Marshal(qrData2)
+
+		// Mock vision service to return two detections
+		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{
+				objectdetection.NewDetection(
+					image.Rectangle{Min: image.Point{X: 10, Y: 10}, Max: image.Point{X: 100, Y: 100}},
+					1.0,
+					string(jsonData1),
+				),
+				objectdetection.NewDetection(
+					image.Rectangle{Min: image.Point{X: 110, Y: 10}, Max: image.Point{X: 200, Y: 100}},
+					1.0,
+					string(jsonData2),
+				),
+			}, nil
+		}
+
+		// Call scanAndCompare
+		svc.scanAndCompare(ctx)
+
+		// Verify both codes were added
+		svc.monitorMu.Lock()
+		defer svc.monitorMu.Unlock()
+
+		if len(svc.visibleCodes) != 2 {
+			t.Errorf("expected 2 visible codes, got: %d", len(svc.visibleCodes))
+		}
+
+		code1, ok1 := svc.visibleCodes[string(jsonData1)]
+		code2, ok2 := svc.visibleCodes[string(jsonData2)]
+
+		if !ok1 || !ok2 {
+			t.Fatal("expected both codes to be in visibleCodes map")
+		}
+
+		if code1.ItemID != "item-001" || code1.ItemName != "Apple" {
+			t.Error("code1 data mismatch")
+		}
+		if code2.ItemID != "item-002" || code2.ItemName != "Banana" {
+			t.Error("code2 data mismatch")
+		}
+	})
+
+	t.Run("handles vision service errors gracefully", func(t *testing.T) {
+		// Mock vision service to return an error
+		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return nil, errors.New("vision service unavailable")
+		}
+
+		// Call scanAndCompare - should not panic
+		svc.scanAndCompare(ctx)
+
+		// State should remain unchanged (empty in this case)
+		svc.monitorMu.Lock()
+		defer svc.monitorMu.Unlock()
+
+		// visibleCodes should still be empty or unchanged from before the error
 	})
 }
