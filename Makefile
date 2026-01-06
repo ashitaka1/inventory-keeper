@@ -34,3 +34,14 @@ all: test module.tar.gz
 
 setup:
 	go mod tidy
+
+test-qr:
+	@echo "Generating test QR codes from testdata/items.json..."
+	@mkdir -p testdata/qr
+	@jq -c '.[]' testdata/items.json | while read item; do \
+		item_id=$$(echo $$item | jq -r '.item_id'); \
+		echo "  Generating QR code for $$item_id..."; \
+		echo $$item | qrencode -s 10 -o testdata/qr/qr-$$item_id.png; \
+	done
+	@echo "Done! QR codes saved to testdata/qr/"
+	@ls -1 testdata/qr/ | wc -l | xargs echo "Generated" | xargs -I {} echo "{} QR codes"

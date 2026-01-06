@@ -28,3 +28,6 @@ go.work.sum
 # Build outputs
 bin
 *tar.gz
+
+# Generated test QR codes
+testdata/qr/

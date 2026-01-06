@@ -1,0 +1,34 @@
+[
+  {
+    "item_id": "apple-001",
+    "item_name": "Honeycrisp Apple"
+  },
+  {
+    "item_id": "banana-042",
+    "item_name": "Organic Banana"
+  },
+  {
+    "item_id": "milk-128",
+    "item_name": "Whole Milk 1gal"
+  },
+  {
+    "item_id": "bread-305",
+    "item_name": "Sourdough Loaf"
+  },
+  {
+    "item_id": "eggs-217",
+    "item_name": "Free Range Eggs"
+  },
+  {
+    "item_id": "cheese-099",
+    "item_name": "Cheddar Cheese"
+  },
+  {
+    "item_id": "yogurt-555",
+    "item_name": "Greek Yogurt"
+  },
+  {
+    "item_id": "coffee-888",
+    "item_name": "Dark Roast Coffee"
+  }
+]
