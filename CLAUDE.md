@@ -105,9 +105,61 @@ All JSON fields available in `cmd map[string]interface{}`. Use `"command"` for r
 2. ✅ **Phase 2: QR Generation** - Generate codes for items
 3. ✅ **Phase 3: QR Detection** - Scan codes with vision service, continuous monitoring
 4. **Phase 3.1: Debouncing** ← **CURRENT** - Fix flapping with grace period for disappeared codes
-5. **Phase 4: Inventory + Checkout** ← **MVP** - Track items, basic checkout
+5. **Phase 4: Inventory Tracking** ← **MVP** - In-memory inventory state, track items on shelf, basic check-in/check-out
 
-After MVP: Face recognition, state machine, alerts
+## Future Phases (Post-MVP)
+
+### Phase 5: Data Capture & Persistence
+- Configure Viam data capture service on face camera
+- `capture_face` command for manual captures with person labeling
+- Collect training dataset (50-100 images per person, varied angles/lighting)
+- Data service integration for cloud persistence
+- Transaction history storage
+- Inventory snapshots and state persistence
+
+### Phase 6: Face Recognition & Person Tracking
+- Train ML model using Viam's ML training service
+- Config: `face_camera_name`, `ml_model_service_name`
+- `recognize_person` command (return identity + confidence)
+- Track current person at shelf with timestamps
+- User enrollment workflow via webcam
+- Handle unknown faces gracefully
+
+### Phase 7: Checkout State Machine
+- States: IDLE, PERSON_DETECTED, ITEMS_SCANNED, CHECKOUT_COMPLETE
+- State transitions based on person presence + item changes
+- Background monitoring with configurable timing:
+  - `check_in_delay_seconds` (default: 5s) - grace period before marking item checked in
+  - `theft_alert_delay_seconds` (default: 3s) - delay before firing theft alert
+- `get_status` command - return current state, person, cart items
+- Auto check-in when items return to shelf
+- Authorized vs unauthorized removal detection
+
+### Phase 8: Integrations & Alerts
+- **Slack Integration** (optional):
+  - Config: `slack_webhook_url`
+  - Theft alerts with face photo attachments
+  - Checkout completion notifications
+  - Modular design for future OAuth upgrade
+- **StreamDeck Integration** (optional):
+  - Config: `streamdeck_name`
+  - Display checkout buttons for available items
+  - Visual checkout status updates
+  - Handle button press events for checkout flow
+- **Web App** (React/TypeScript):
+  - Real-time inventory view with status badges
+  - Item management (add/edit/delete, QR scanner)
+  - User enrollment interface
+  - Transaction history with filters
+  - Alert dashboard with face photos
+  - Viam TypeScript SDK integration
+
+### Architecture Notes for Future Phases
+- **Event-Driven**: State transitions triggered by QR detection events
+- **Modular**: Design for easy extension (webhook → OAuth bot, etc.)
+- **Viam-Native**: Use built-in services (vision, ML, data) vs external dependencies
+- **State Management**: Item states (on_shelf, checked_out, missing) with timestamps
+- **Data Models**: Item, User, Transaction, Alert structs with proper relationships
 
 ## Viam Configuration
 
