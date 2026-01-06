@@ -101,10 +101,11 @@ All JSON fields available in `cmd map[string]interface{}`. Use `"command"` for r
 
 ## Roadmap to MVP
 
-1. ✅ **Camera Access** - Access camera from config
-2. ✅ **QR Generation** - Generate codes for items
-3. ✅ **QR Detection** - Scan codes with vision service, continuous monitoring
-4. **Inventory + Checkout** ← **MVP** - Track items, basic checkout
+1. ✅ **Phase 1: Camera Access** - Access camera from config
+2. ✅ **Phase 2: QR Generation** - Generate codes for items
+3. ✅ **Phase 3: QR Detection** - Scan codes with vision service, continuous monitoring
+4. **Phase 3.1: Debouncing** ← **CURRENT** - Fix flapping with grace period for disappeared codes
+5. **Phase 4: Inventory + Checkout** ← **MVP** - Track items, basic checkout
 
 After MVP: Face recognition, state machine, alerts
 
