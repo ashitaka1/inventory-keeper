@@ -25,19 +25,23 @@ Viam module for automated shelf inventory tracking using QR codes and facial rec
 - ItemQRData struct (item_id, item_name)
 - Comprehensive test coverage
 
-**Phase 3 Complete** ✅ - QR Detection
+**Phase 3 Complete** ✅ - QR Detection & Continuous Monitoring
 - Vision service integration with pyzbar
 - Config field `qr_vision_service` with validation
-- Continuous monitoring with background goroutine
+- Continuous background monitoring with configurable scan interval
+- Pointer-based `scan_interval_ms` config: nil=default 1000ms, 0=disabled, >0=custom interval
+- State tracking with DetectedQRCode (FirstSeen, LastSeen timestamps)
 - DEBUG logging for QR code appearance/disappearance
-- State tracking with DetectedQRCode
-- Optional `scan_interval_ms` config (defaults to 1000ms)
+- Test fixtures in `testdata/items.json` with `make test-qr` for generating QR codes
+- Comprehensive behavioral tests including monitoring start/stop conditions
+- Successfully tested with real camera and multiple QR codes
 
 ## Commands
 
 ```bash
 make module         # Build module tarball (runs tests first)
 make test          # Run all tests
+make test-qr       # Generate test QR codes from testdata/items.json
 go test -v         # Verbose test output
 go test -v -run TestName  # Run specific test
 
@@ -60,7 +64,7 @@ Standard Viam module generated with `viam module generate`:
 type Config struct {
     CameraName      string `json:"camera_name"`       // Required
     QRVisionService string `json:"qr_vision_service"` // Required
-    ScanIntervalMs  int    `json:"scan_interval_ms"`  // Optional, defaults to 1000ms
+    ScanIntervalMs  *int   `json:"scan_interval_ms"`  // Optional: nil=1000ms default, 0=disabled, >0=custom
 }
 ```
 
