@@ -274,7 +274,7 @@ func (s *inventoryKeeperKeeper) startMonitoring() {
 		interval = time.Duration(*s.cfg.ScanIntervalMs) * time.Millisecond
 	}
 
-	s.logger.Debugf("Starting QR code monitoring with interval: %v", interval)
+	s.logger.Infof("Starting QR code monitoring with interval: %v", interval)
 
 	go func() {
 		ticker := time.NewTicker(interval)
