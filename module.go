@@ -53,8 +53,11 @@ type Config struct {
 	// Vision service for QR detection
 	QRVisionService string `json:"qr_vision_service"`
 
-	// Scan interval in milliseconds (optional, defaults to 1000ms)
-	ScanIntervalMs int `json:"scan_interval_ms"`
+	// Scan interval in milliseconds (optional)
+	// - nil: defaults to 1000ms, monitoring enabled
+	// - 0: monitoring explicitly disabled (useful for tests)
+	// - positive value: custom interval, monitoring enabled
+	ScanIntervalMs *int `json:"scan_interval_ms,omitempty"`
 
 	// Future config fields will be added incrementally as features are implemented:
 	// - Vision service for facial recognition
@@ -82,6 +85,11 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	// Validate required QR vision service field
 	if cfg.QRVisionService == "" {
 		return nil, nil, errors.New("qr_vision_service is required")
+	}
+
+	// Validate scan_interval_ms if provided
+	if cfg.ScanIntervalMs != nil && *cfg.ScanIntervalMs < 0 {
+		return nil, nil, fmt.Errorf("scan_interval_ms must be non-negative, got: %d", *cfg.ScanIntervalMs)
 	}
 
 	// Return both camera and QR vision service as required dependencies
@@ -145,8 +153,12 @@ func NewKeeper(ctx context.Context, deps resource.Dependencies, name resource.Na
 		cancelFunc:      cancelFunc,
 	}
 
-	// Start background monitoring
-	s.startMonitoring()
+	// Start background monitoring (only if not explicitly disabled)
+	if conf.ScanIntervalMs == nil || *conf.ScanIntervalMs > 0 {
+		s.startMonitoring()
+	} else {
+		logger.Debug("QR code monitoring explicitly disabled (scan_interval_ms=0)")
+	}
 
 	logger.Infof("Inventory keeper initialized with camera: %s, QR vision service: %s", conf.CameraName, conf.QRVisionService)
 	return s, nil
@@ -253,9 +265,13 @@ func (s *inventoryKeeperKeeper) handleGenerateQR(ctx context.Context, cmd map[st
 // startMonitoring starts the background QR code monitoring loop
 func (s *inventoryKeeperKeeper) startMonitoring() {
 	// Determine scan interval
-	interval := time.Duration(s.cfg.ScanIntervalMs) * time.Millisecond
-	if interval == 0 {
-		interval = 1 * time.Second // Default to 1 second
+	var interval time.Duration
+	if s.cfg.ScanIntervalMs == nil {
+		// Default to 1 second when not specified
+		interval = 1 * time.Second
+	} else {
+		// Use specified interval (caller ensures this is > 0)
+		interval = time.Duration(*s.cfg.ScanIntervalMs) * time.Millisecond
 	}
 
 	s.logger.Debugf("Starting QR code monitoring with interval: %v", interval)

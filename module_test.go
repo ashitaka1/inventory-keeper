@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"image"
+	"sync"
 	"testing"
+	"time"
 
 	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/logging"
@@ -63,15 +65,32 @@ func TestConfigValidate(t *testing.T) {
 			t.Error("expected error for missing qr_vision_service")
 		}
 	})
+
+	t.Run("negative scan_interval_ms returns error", func(t *testing.T) {
+		negativeInterval := -100
+		cfg := &Config{
+			CameraName:      "shelf-camera",
+			QRVisionService: "qr-detector",
+			ScanIntervalMs:  &negativeInterval,
+		}
+
+		_, _, err := cfg.Validate("")
+		if err == nil {
+			t.Error("expected error for negative scan_interval_ms")
+		}
+	})
 }
 
 func TestDoCommand(t *testing.T) {
 	ctx := context.Background()
 	logger := logging.NewTestLogger(t)
+
+	// Explicitly disable background monitoring for this test
+	disabledInterval := 0
 	cfg := &Config{
 		CameraName:      "test-camera",
 		QRVisionService: "test-qr-vision",
-		ScanIntervalMs:  999999999, // Disable background monitoring for tests
+		ScanIntervalMs:  &disabledInterval,
 	}
 
 	mockCam := &inject.Camera{}
@@ -153,10 +172,13 @@ func TestDoCommand(t *testing.T) {
 func TestGenerateQR(t *testing.T) {
 	ctx := context.Background()
 	logger := logging.NewTestLogger(t)
+
+	// Explicitly disable background monitoring for this test
+	disabledInterval := 0
 	cfg := &Config{
 		CameraName:      "test-camera",
 		QRVisionService: "test-qr-vision",
-		ScanIntervalMs:  999999999, // Disable background monitoring for tests
+		ScanIntervalMs:  &disabledInterval,
 	}
 
 	mockCam := &inject.Camera{}
@@ -260,10 +282,13 @@ func TestGenerateQR(t *testing.T) {
 func TestScanAndCompare(t *testing.T) {
 	ctx := context.Background()
 	logger := logging.NewTestLogger(t)
+
+	// Explicitly disable background monitoring for this test
+	disabledInterval := 0
 	cfg := &Config{
 		CameraName:      "test-camera",
 		QRVisionService: "test-qr-vision",
-		ScanIntervalMs:  999999999, // Effectively disable background monitoring for tests
+		ScanIntervalMs:  &disabledInterval,
 	}
 
 	mockCam := &inject.Camera{}
@@ -292,8 +317,7 @@ func TestScanAndCompare(t *testing.T) {
 
 	svc := keeper.(*inventoryKeeperKeeper)
 
-	// Stop the background monitoring goroutine to prevent race conditions in tests
-	svc.cancelFunc()
+	// No need to stop monitoring - it never started (ScanIntervalMs = 0)
 
 	t.Run("detects new QR code with ItemQRData", func(t *testing.T) {
 		// Create ItemQRData JSON
@@ -489,5 +513,160 @@ func TestScanAndCompare(t *testing.T) {
 		defer svc.monitorMu.Unlock()
 
 		// visibleCodes should still be empty or unchanged from before the error
+	})
+}
+
+func TestMonitoringStartBehavior(t *testing.T) {
+	ctx := context.Background()
+	logger := logging.NewTestLogger(t)
+
+	t.Run("monitoring starts when ScanIntervalMs is nil", func(t *testing.T) {
+		// Track if DetectionsFromCamera was called
+		callCount := 0
+		var mu sync.Mutex
+
+		mockCam := &inject.Camera{}
+		mockVision := inject.NewVisionService("test-qr-vision")
+
+		// Set up DetectionsFunc to make inject package use DetectionsFromCameraFunc
+		mockVision.DetectionsFunc = func(ctx context.Context, img image.Image, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{}, nil
+		}
+
+		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			mu.Lock()
+			callCount++
+			mu.Unlock()
+			return []objectdetection.Detection{}, nil
+		}
+
+		deps := resource.Dependencies{
+			camera.Named("test-camera"):    mockCam,
+			vision.Named("test-qr-vision"): mockVision,
+		}
+
+		// Config with nil ScanIntervalMs (should use default 1000ms)
+		cfg := &Config{
+			CameraName:      "test-camera",
+			QRVisionService: "test-qr-vision",
+			ScanIntervalMs:  nil,
+		}
+
+		keeper, err := NewKeeper(ctx, deps, resource.NewName(generic.API, "test"), cfg, logger)
+		if err != nil {
+			t.Fatalf("failed to create keeper: %v", err)
+		}
+		defer keeper.Close(ctx)
+
+		// Wait slightly longer than the default interval to verify monitoring started
+		time.Sleep(1200 * time.Millisecond)
+
+		mu.Lock()
+		count := callCount
+		mu.Unlock()
+
+		if count == 0 {
+			t.Error("expected DetectionsFromCamera to be called (monitoring should have started with default interval)")
+		}
+	})
+
+	t.Run("monitoring disabled when ScanIntervalMs is 0", func(t *testing.T) {
+		// Track if DetectionsFromCamera was called
+		callCount := 0
+		var mu sync.Mutex
+
+		mockCam := &inject.Camera{}
+		mockVision := inject.NewVisionService("test-qr-vision")
+
+		mockVision.DetectionsFunc = func(ctx context.Context, img image.Image, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{}, nil
+		}
+
+		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			mu.Lock()
+			callCount++
+			mu.Unlock()
+			return []objectdetection.Detection{}, nil
+		}
+
+		deps := resource.Dependencies{
+			camera.Named("test-camera"):    mockCam,
+			vision.Named("test-qr-vision"): mockVision,
+		}
+
+		// Config with ScanIntervalMs = 0 (explicitly disabled)
+		disabledInterval := 0
+		cfg := &Config{
+			CameraName:      "test-camera",
+			QRVisionService: "test-qr-vision",
+			ScanIntervalMs:  &disabledInterval,
+		}
+
+		keeper, err := NewKeeper(ctx, deps, resource.NewName(generic.API, "test"), cfg, logger)
+		if err != nil {
+			t.Fatalf("failed to create keeper: %v", err)
+		}
+		defer keeper.Close(ctx)
+
+		// Wait a bit to ensure monitoring would have started if it were going to
+		time.Sleep(200 * time.Millisecond)
+
+		mu.Lock()
+		count := callCount
+		mu.Unlock()
+
+		if count != 0 {
+			t.Errorf("expected DetectionsFromCamera to NOT be called (monitoring should be disabled), but it was called %d times", count)
+		}
+	})
+
+	t.Run("monitoring starts when ScanIntervalMs is positive", func(t *testing.T) {
+		// Track if DetectionsFromCamera was called
+		callCount := 0
+		var mu sync.Mutex
+
+		mockCam := &inject.Camera{}
+		mockVision := inject.NewVisionService("test-qr-vision")
+
+		mockVision.DetectionsFunc = func(ctx context.Context, img image.Image, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{}, nil
+		}
+
+		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			mu.Lock()
+			callCount++
+			mu.Unlock()
+			return []objectdetection.Detection{}, nil
+		}
+
+		deps := resource.Dependencies{
+			camera.Named("test-camera"):    mockCam,
+			vision.Named("test-qr-vision"): mockVision,
+		}
+
+		// Config with custom interval (100ms for faster testing)
+		customInterval := 100
+		cfg := &Config{
+			CameraName:      "test-camera",
+			QRVisionService: "test-qr-vision",
+			ScanIntervalMs:  &customInterval,
+		}
+
+		keeper, err := NewKeeper(ctx, deps, resource.NewName(generic.API, "test"), cfg, logger)
+		if err != nil {
+			t.Fatalf("failed to create keeper: %v", err)
+		}
+		defer keeper.Close(ctx)
+
+		// Wait for at least one monitoring cycle (100ms + buffer)
+		time.Sleep(150 * time.Millisecond)
+
+		mu.Lock()
+		count := callCount
+		mu.Unlock()
+
+		if count == 0 {
+			t.Error("expected DetectionsFromCamera to be called (monitoring should have started with custom interval)")
+		}
 	})
 }
