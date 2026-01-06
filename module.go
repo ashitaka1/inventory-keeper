@@ -157,7 +157,7 @@ func NewKeeper(ctx context.Context, deps resource.Dependencies, name resource.Na
 	if conf.ScanIntervalMs == nil || *conf.ScanIntervalMs > 0 {
 		s.startMonitoring()
 	} else {
-		logger.Debug("QR code monitoring explicitly disabled (scan_interval_ms=0)")
+		logger.Info("QR code monitoring explicitly disabled (scan_interval_ms=0)")
 	}
 
 	logger.Infof("Inventory keeper initialized with camera: %s, QR vision service: %s", conf.CameraName, conf.QRVisionService)
