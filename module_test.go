@@ -71,13 +71,20 @@ func TestDoCommand(t *testing.T) {
 	cfg := &Config{
 		CameraName:      "test-camera",
 		QRVisionService: "test-qr-vision",
+		ScanIntervalMs:  999999999, // Disable background monitoring for tests
 	}
 
 	mockCam := &inject.Camera{}
 	mockVision := inject.NewVisionService("test-qr-vision")
+
+	// Initialize with empty detections to prevent nil pointer panics from background goroutine
+	mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+		return []objectdetection.Detection{}, nil
+	}
+
 	deps := resource.Dependencies{
-		camera.Named("test-camera"):        mockCam,
-		vision.Named("test-qr-vision"):     mockVision,
+		camera.Named("test-camera"):    mockCam,
+		vision.Named("test-qr-vision"): mockVision,
 	}
 
 	keeper, err := NewKeeper(ctx, deps, resource.NewName(generic.API, "test"), cfg, logger)
@@ -149,10 +156,17 @@ func TestGenerateQR(t *testing.T) {
 	cfg := &Config{
 		CameraName:      "test-camera",
 		QRVisionService: "test-qr-vision",
+		ScanIntervalMs:  999999999, // Disable background monitoring for tests
 	}
 
 	mockCam := &inject.Camera{}
 	mockVision := inject.NewVisionService("test-qr-vision")
+
+	// Initialize with empty detections to prevent nil pointer panics from background goroutine
+	mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+		return []objectdetection.Detection{}, nil
+	}
+
 	deps := resource.Dependencies{
 		camera.Named("test-camera"):    mockCam,
 		vision.Named("test-qr-vision"): mockVision,
@@ -249,10 +263,22 @@ func TestScanAndCompare(t *testing.T) {
 	cfg := &Config{
 		CameraName:      "test-camera",
 		QRVisionService: "test-qr-vision",
+		ScanIntervalMs:  999999999, // Effectively disable background monitoring for tests
 	}
 
 	mockCam := &inject.Camera{}
 	mockVision := inject.NewVisionService("test-qr-vision")
+
+	// Initialize with empty detections by default to prevent nil pointer in background goroutine
+	// Note: The inject package checks if DetectionsFunc is nil, and if so, tries to call the real Service.
+	// We need to set DetectionsFunc to non-nil so it uses Detections FromCameraFunc instead.
+	mockVision.DetectionsFunc = func(ctx context.Context, img image.Image, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+		return []objectdetection.Detection{}, nil
+	}
+	mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+		return []objectdetection.Detection{}, nil
+	}
+
 	deps := resource.Dependencies{
 		camera.Named("test-camera"):    mockCam,
 		vision.Named("test-qr-vision"): mockVision,
@@ -266,17 +292,21 @@ func TestScanAndCompare(t *testing.T) {
 
 	svc := keeper.(*inventoryKeeperKeeper)
 
+	// Stop the background monitoring goroutine to prevent race conditions in tests
+	svc.cancelFunc()
+
 	t.Run("detects new QR code with ItemQRData", func(t *testing.T) {
 		// Create ItemQRData JSON
 		qrData := ItemQRData{ItemID: "item-001", ItemName: "Apple"}
 		jsonData, _ := json.Marshal(qrData)
 
-		// Mock vision service to return one detection
+		// Set detection behavior for this test
 		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
 			return []objectdetection.Detection{
 				objectdetection.NewDetection(
-					image.Rectangle{Min: image.Point{X: 10, Y: 10}, Max: image.Point{X: 100, Y: 100}},
-					1.0,
+					image.Rectangle{Min: image.Point{X: 0, Y: 0}, Max: image.Point{X: 640, Y: 480}}, // Image bounds
+					image.Rectangle{Min: image.Point{X: 10, Y: 10}, Max: image.Point{X: 100, Y: 100}}, // Bounding box
+					1.0, // Confidence
 					string(jsonData),
 				),
 			}, nil
@@ -317,12 +347,13 @@ func TestScanAndCompare(t *testing.T) {
 
 		unknownContent := "https://example.com"
 
-		// Mock vision service to return unknown QR code
+		// Set detection behavior for this test
 		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
 			return []objectdetection.Detection{
 				objectdetection.NewDetection(
-					image.Rectangle{Min: image.Point{X: 10, Y: 10}, Max: image.Point{X: 100, Y: 100}},
-					1.0,
+					image.Rectangle{Min: image.Point{X: 0, Y: 0}, Max: image.Point{X: 640, Y: 480}}, // Image bounds
+					image.Rectangle{Min: image.Point{X: 10, Y: 10}, Max: image.Point{X: 100, Y: 100}}, // Bounding box
+					1.0, // Confidence
 					unknownContent,
 				),
 			}, nil
@@ -370,7 +401,7 @@ func TestScanAndCompare(t *testing.T) {
 		}
 		svc.monitorMu.Unlock()
 
-		// Mock vision service to return empty detections (code disappeared)
+		// Set detection behavior for this test (return empty to simulate disappearance)
 		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
 			return []objectdetection.Detection{}, nil
 		}
@@ -400,17 +431,19 @@ func TestScanAndCompare(t *testing.T) {
 		qrData2 := ItemQRData{ItemID: "item-002", ItemName: "Banana"}
 		jsonData2, _ := json.Marshal(qrData2)
 
-		// Mock vision service to return two detections
+		// Set detection behavior for this test (return two detections)
 		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
 			return []objectdetection.Detection{
 				objectdetection.NewDetection(
-					image.Rectangle{Min: image.Point{X: 10, Y: 10}, Max: image.Point{X: 100, Y: 100}},
-					1.0,
+					image.Rectangle{Min: image.Point{X: 0, Y: 0}, Max: image.Point{X: 640, Y: 480}}, // Image bounds
+					image.Rectangle{Min: image.Point{X: 10, Y: 10}, Max: image.Point{X: 100, Y: 100}}, // Bounding box
+					1.0, // Confidence
 					string(jsonData1),
 				),
 				objectdetection.NewDetection(
-					image.Rectangle{Min: image.Point{X: 110, Y: 10}, Max: image.Point{X: 200, Y: 100}},
-					1.0,
+					image.Rectangle{Min: image.Point{X: 0, Y: 0}, Max: image.Point{X: 640, Y: 480}}, // Image bounds
+					image.Rectangle{Min: image.Point{X: 110, Y: 10}, Max: image.Point{X: 200, Y: 100}}, // Bounding box
+					1.0, // Confidence
 					string(jsonData2),
 				),
 			}, nil
@@ -443,7 +476,7 @@ func TestScanAndCompare(t *testing.T) {
 	})
 
 	t.Run("handles vision service errors gracefully", func(t *testing.T) {
-		// Mock vision service to return an error
+		// Set detection behavior for this test (return an error)
 		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
 			return nil, errors.New("vision service unavailable")
 		}
