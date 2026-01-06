@@ -36,6 +36,15 @@ Viam module for automated shelf inventory tracking using QR codes and facial rec
 - Comprehensive behavioral tests including monitoring start/stop conditions
 - Successfully tested with real camera and multiple QR codes
 
+**Phase 3.1 Complete** ✅ - QR Code Debouncing
+- Config field `grace_period_ms` with validation (nil=default 2000ms, 0=disabled, >0=custom)
+- Grace period prevents false "disappeared" events from temporary detection failures
+- Codes marked as `PendingRemoval` when not detected, tracking `DisappearedAt` timestamp
+- Only removed after grace period expires without re-detection
+- Codes reappearing during grace period reset the timer
+- Comprehensive tests for all debouncing scenarios
+- Eliminates "flapping" from intermittent camera/lighting issues
+
 ## Commands
 
 ```bash
@@ -65,6 +74,7 @@ type Config struct {
     CameraName      string `json:"camera_name"`       // Required
     QRVisionService string `json:"qr_vision_service"` // Required
     ScanIntervalMs  *int   `json:"scan_interval_ms"`  // Optional: nil=1000ms default, 0=disabled, >0=custom
+    GracePeriodMs   *int   `json:"grace_period_ms"`   // Optional: nil=2000ms default, 0=no debounce, >0=custom
 }
 ```
 
@@ -104,8 +114,8 @@ All JSON fields available in `cmd map[string]interface{}`. Use `"command"` for r
 1. ✅ **Phase 1: Camera Access** - Access camera from config
 2. ✅ **Phase 2: QR Generation** - Generate codes for items
 3. ✅ **Phase 3: QR Detection** - Scan codes with vision service, continuous monitoring
-4. **Phase 3.1: Debouncing** ← **CURRENT** - Fix flapping with grace period for disappeared codes
-5. **Phase 4: Inventory Tracking** ← **MVP** - In-memory inventory state, track items on shelf, basic check-in/check-out
+4. ✅ **Phase 3.1: Debouncing** - Fix flapping with grace period for disappeared codes
+5. **Phase 4: Inventory Tracking** ← **CURRENT** ← **MVP** - In-memory inventory state, track items on shelf, basic check-in/check-out
 
 ## Future Phases (Post-MVP)
 

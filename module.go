@@ -31,11 +31,13 @@ type ItemQRData struct {
 
 // DetectedQRCode tracks a QR code that's currently visible in the camera view
 type DetectedQRCode struct {
-	Content   string    // Raw QR code content
-	ItemID    string    // Parsed item_id (if content is ItemQRData JSON)
-	ItemName  string    // Parsed item_name (if content is ItemQRData JSON)
-	FirstSeen time.Time // When this code was first detected
-	LastSeen  time.Time // Last time this code was seen
+	Content        string    // Raw QR code content
+	ItemID         string    // Parsed item_id (if content is ItemQRData JSON)
+	ItemName       string    // Parsed item_name (if content is ItemQRData JSON)
+	FirstSeen      time.Time // When this code was first detected
+	LastSeen       time.Time // Last time this code was seen
+	PendingRemoval bool      // True if code disappeared but still in grace period
+	DisappearedAt  time.Time // When code first went missing (for grace period tracking)
 }
 
 func init() {
@@ -58,6 +60,13 @@ type Config struct {
 	// - 0: monitoring explicitly disabled (useful for tests)
 	// - positive value: custom interval, monitoring enabled
 	ScanIntervalMs *int `json:"scan_interval_ms,omitempty"`
+
+	// Grace period in milliseconds before considering a QR code truly disappeared (optional)
+	// - nil: defaults to 2000ms (2 seconds)
+	// - 0: no grace period, immediate removal
+	// - positive value: custom grace period
+	// This prevents false "disappeared" events from temporary detection failures
+	GracePeriodMs *int `json:"grace_period_ms,omitempty"`
 
 	// Future config fields will be added incrementally as features are implemented:
 	// - Vision service for facial recognition
@@ -90,6 +99,11 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	// Validate scan_interval_ms if provided
 	if cfg.ScanIntervalMs != nil && *cfg.ScanIntervalMs < 0 {
 		return nil, nil, fmt.Errorf("scan_interval_ms must be non-negative, got: %d", *cfg.ScanIntervalMs)
+	}
+
+	// Validate grace_period_ms if provided
+	if cfg.GracePeriodMs != nil && *cfg.GracePeriodMs < 0 {
+		return nil, nil, fmt.Errorf("grace_period_ms must be non-negative, got: %d", *cfg.GracePeriodMs)
 	}
 
 	// Return both camera and QR vision service as required dependencies
@@ -301,13 +315,23 @@ func (s *inventoryKeeperKeeper) scanAndCompare(ctx context.Context) {
 		return
 	}
 
+	// Determine grace period
+	var gracePeriod time.Duration
+	if s.cfg.GracePeriodMs == nil {
+		// Default to 2 seconds
+		gracePeriod = 2 * time.Second
+	} else {
+		gracePeriod = time.Duration(*s.cfg.GracePeriodMs) * time.Millisecond
+	}
+
 	// Track currently detected codes
-	currentCodes := make(map[string]*DetectedQRCode)
+	currentlyDetected := make(map[string]bool)
 	now := time.Now()
 
 	// Process each detection
 	for _, detection := range detections {
 		content := detection.Label()
+		currentlyDetected[content] = true
 
 		// Try to parse as ItemQRData JSON
 		var itemData ItemQRData
@@ -319,7 +343,6 @@ func (s *inventoryKeeperKeeper) scanAndCompare(ctx context.Context) {
 			itemName = itemData.ItemName
 		}
 
-		// Check if this is a new code (appearance)
 		s.monitorMu.Lock()
 		existingCode, exists := s.visibleCodes[content]
 		s.monitorMu.Unlock()
@@ -331,41 +354,69 @@ func (s *inventoryKeeperKeeper) scanAndCompare(ctx context.Context) {
 			} else {
 				s.logger.Debugf("QR code appeared: unknown content - %s", content)
 			}
-		}
 
-		// Create or update the detected code
-		code := &DetectedQRCode{
-			Content:  content,
-			ItemID:   itemID,
-			ItemName: itemName,
-			LastSeen: now,
-		}
+			// Create new detected code
+			code := &DetectedQRCode{
+				Content:        content,
+				ItemID:         itemID,
+				ItemName:       itemName,
+				FirstSeen:      now,
+				LastSeen:       now,
+				PendingRemoval: false,
+			}
 
-		if existingCode != nil {
-			// Preserve FirstSeen timestamp
-			code.FirstSeen = existingCode.FirstSeen
+			s.monitorMu.Lock()
+			s.visibleCodes[content] = code
+			s.monitorMu.Unlock()
 		} else {
-			code.FirstSeen = now
+			// Code still visible - update LastSeen and clear pending removal
+			s.monitorMu.Lock()
+			existingCode.LastSeen = now
+			if existingCode.PendingRemoval {
+				// Code reappeared during grace period
+				existingCode.PendingRemoval = false
+				existingCode.DisappearedAt = time.Time{} // Clear disappeared timestamp
+			}
+			s.monitorMu.Unlock()
 		}
-
-		currentCodes[content] = code
 	}
 
-	// Find codes that disappeared (in visibleCodes but not in currentCodes)
+	// Handle codes that are not currently detected
 	s.monitorMu.Lock()
+	toRemove := []string{}
 	for content, code := range s.visibleCodes {
-		if _, stillVisible := currentCodes[content]; !stillVisible {
-			// Code disappeared
-			if code.ItemID != "" {
-				s.logger.Debugf("QR code disappeared: %s (%s)", code.ItemID, code.ItemName)
+		if _, stillVisible := currentlyDetected[content]; !stillVisible {
+			if gracePeriod == 0 {
+				// No grace period - remove immediately
+				if code.ItemID != "" {
+					s.logger.Debugf("QR code disappeared: %s (%s)", code.ItemID, code.ItemName)
+				} else {
+					s.logger.Debugf("QR code disappeared: unknown content - %s", content)
+				}
+				toRemove = append(toRemove, content)
+			} else if !code.PendingRemoval {
+				// Code just disappeared - start grace period
+				code.PendingRemoval = true
+				code.DisappearedAt = now
 			} else {
-				s.logger.Debugf("QR code disappeared: unknown content - %s", content)
+				// Code already pending removal - check if grace period expired
+				if now.Sub(code.DisappearedAt) >= gracePeriod {
+					// Grace period expired - truly disappeared
+					if code.ItemID != "" {
+						s.logger.Debugf("QR code disappeared: %s (%s)", code.ItemID, code.ItemName)
+					} else {
+						s.logger.Debugf("QR code disappeared: unknown content - %s", content)
+					}
+					toRemove = append(toRemove, content)
+				}
 			}
 		}
 	}
 
-	// Update visible codes map
-	s.visibleCodes = currentCodes
+	// Remove codes that have exceeded grace period
+	for _, content := range toRemove {
+		delete(s.visibleCodes, content)
+	}
 	s.monitorMu.Unlock()
 }
 

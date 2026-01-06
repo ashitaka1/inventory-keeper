@@ -79,6 +79,20 @@ func TestConfigValidate(t *testing.T) {
 			t.Error("expected error for negative scan_interval_ms")
 		}
 	})
+
+	t.Run("negative grace_period_ms returns error", func(t *testing.T) {
+		negativeGracePeriod := -100
+		cfg := &Config{
+			CameraName:      "shelf-camera",
+			QRVisionService: "qr-detector",
+			GracePeriodMs:   &negativeGracePeriod,
+		}
+
+		_, _, err := cfg.Validate("")
+		if err == nil {
+			t.Error("expected error for negative grace_period_ms")
+		}
+	})
 }
 
 func TestDoCommand(t *testing.T) {
@@ -410,20 +424,37 @@ func TestScanAndCompare(t *testing.T) {
 		}
 	})
 
-	t.Run("detects code disappearance", func(t *testing.T) {
+	t.Run("detects code disappearance with zero grace period", func(t *testing.T) {
+		// Create a new keeper with zero grace period for immediate removal
+		zeroGracePeriod := 0
+		cfgZeroGrace := &Config{
+			CameraName:      "test-camera",
+			QRVisionService: "test-qr-vision",
+			ScanIntervalMs:  &disabledInterval,
+			GracePeriodMs:   &zeroGracePeriod,
+		}
+
+		keeperZeroGrace, err := NewKeeper(ctx, deps, resource.NewName(generic.API, "test-zero-grace"), cfgZeroGrace, logger)
+		if err != nil {
+			t.Fatalf("failed to create keeper: %v", err)
+		}
+		defer keeperZeroGrace.Close(ctx)
+
+		svcZeroGrace := keeperZeroGrace.(*inventoryKeeperKeeper)
+
 		// Setup: Add a code to visibleCodes
 		qrData := ItemQRData{ItemID: "item-002", ItemName: "Banana"}
 		jsonData, _ := json.Marshal(qrData)
 
-		svc.monitorMu.Lock()
-		svc.visibleCodes = map[string]*DetectedQRCode{
+		svcZeroGrace.monitorMu.Lock()
+		svcZeroGrace.visibleCodes = map[string]*DetectedQRCode{
 			string(jsonData): {
 				Content:  string(jsonData),
 				ItemID:   "item-002",
 				ItemName: "Banana",
 			},
 		}
-		svc.monitorMu.Unlock()
+		svcZeroGrace.monitorMu.Unlock()
 
 		// Set detection behavior for this test (return empty to simulate disappearance)
 		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
@@ -431,14 +462,14 @@ func TestScanAndCompare(t *testing.T) {
 		}
 
 		// Call scanAndCompare
-		svc.scanAndCompare(ctx)
+		svcZeroGrace.scanAndCompare(ctx)
 
-		// Verify code was removed
-		svc.monitorMu.Lock()
-		defer svc.monitorMu.Unlock()
+		// Verify code was removed immediately (no grace period)
+		svcZeroGrace.monitorMu.Lock()
+		defer svcZeroGrace.monitorMu.Unlock()
 
-		if len(svc.visibleCodes) != 0 {
-			t.Errorf("expected 0 visible codes after disappearance, got: %d", len(svc.visibleCodes))
+		if len(svcZeroGrace.visibleCodes) != 0 {
+			t.Errorf("expected 0 visible codes after disappearance (zero grace period), got: %d", len(svcZeroGrace.visibleCodes))
 		}
 	})
 
@@ -668,5 +699,352 @@ func TestMonitoringStartBehavior(t *testing.T) {
 		if count == 0 {
 			t.Error("expected DetectionsFromCamera to be called (monitoring should have started with custom interval)")
 		}
+	})
+}
+
+func TestDebouncingBehavior(t *testing.T) {
+	ctx := context.Background()
+	logger := logging.NewTestLogger(t)
+
+	t.Run("code remains visible during grace period", func(t *testing.T) {
+		// Explicitly disable background monitoring for this test
+		disabledInterval := 0
+		gracePeriod := 200 // 200ms grace period
+		cfg := &Config{
+			CameraName:      "test-camera",
+			QRVisionService: "test-qr-vision",
+			ScanIntervalMs:  &disabledInterval,
+			GracePeriodMs:   &gracePeriod,
+		}
+
+		mockCam := &inject.Camera{}
+		mockVision := inject.NewVisionService("test-qr-vision")
+
+		// Create ItemQRData JSON
+		qrData := ItemQRData{ItemID: "item-001", ItemName: "Apple"}
+		jsonData, _ := json.Marshal(qrData)
+
+		// Set detection behavior - initially return detection
+		mockVision.DetectionsFunc = func(ctx context.Context, img image.Image, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{}, nil
+		}
+		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{
+				objectdetection.NewDetection(
+					image.Rectangle{Min: image.Point{X: 0, Y: 0}, Max: image.Point{X: 640, Y: 480}},
+					image.Rectangle{Min: image.Point{X: 10, Y: 10}, Max: image.Point{X: 100, Y: 100}},
+					1.0,
+					string(jsonData),
+				),
+			}, nil
+		}
+
+		deps := resource.Dependencies{
+			camera.Named("test-camera"):    mockCam,
+			vision.Named("test-qr-vision"): mockVision,
+		}
+
+		keeper, err := NewKeeper(ctx, deps, resource.NewName(generic.API, "test"), cfg, logger)
+		if err != nil {
+			t.Fatalf("failed to create keeper: %v", err)
+		}
+		defer keeper.Close(ctx)
+
+		svc := keeper.(*inventoryKeeperKeeper)
+
+		// First scan - code appears
+		svc.scanAndCompare(ctx)
+
+		// Verify code was added
+		svc.monitorMu.Lock()
+		if len(svc.visibleCodes) != 1 {
+			t.Errorf("expected 1 visible code after first scan, got: %d", len(svc.visibleCodes))
+		}
+		svc.monitorMu.Unlock()
+
+		// Change mock to return no detections
+		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{}, nil
+		}
+
+		// Second scan - code disappears but within grace period
+		svc.scanAndCompare(ctx)
+
+		// Code should still be in visibleCodes but marked as pending removal
+		svc.monitorMu.Lock()
+		if len(svc.visibleCodes) != 1 {
+			t.Errorf("expected 1 visible code during grace period, got: %d", len(svc.visibleCodes))
+		}
+		code := svc.visibleCodes[string(jsonData)]
+		if code == nil {
+			t.Fatal("code should still exist during grace period")
+		}
+		if !code.PendingRemoval {
+			t.Error("code should be marked as pending removal")
+		}
+		svc.monitorMu.Unlock()
+
+		// Wait less than grace period and scan again
+		time.Sleep(100 * time.Millisecond)
+		svc.scanAndCompare(ctx)
+
+		// Code should still be present (grace period not expired)
+		svc.monitorMu.Lock()
+		if len(svc.visibleCodes) != 1 {
+			t.Errorf("expected 1 visible code (grace period not expired), got: %d", len(svc.visibleCodes))
+		}
+		svc.monitorMu.Unlock()
+	})
+
+	t.Run("code removed after grace period expires", func(t *testing.T) {
+		disabledInterval := 0
+		gracePeriod := 100 // 100ms grace period for faster test
+		cfg := &Config{
+			CameraName:      "test-camera",
+			QRVisionService: "test-qr-vision",
+			ScanIntervalMs:  &disabledInterval,
+			GracePeriodMs:   &gracePeriod,
+		}
+
+		mockCam := &inject.Camera{}
+		mockVision := inject.NewVisionService("test-qr-vision")
+
+		qrData := ItemQRData{ItemID: "item-001", ItemName: "Apple"}
+		jsonData, _ := json.Marshal(qrData)
+
+		// Initially return detection
+		mockVision.DetectionsFunc = func(ctx context.Context, img image.Image, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{}, nil
+		}
+		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{
+				objectdetection.NewDetection(
+					image.Rectangle{Min: image.Point{X: 0, Y: 0}, Max: image.Point{X: 640, Y: 480}},
+					image.Rectangle{Min: image.Point{X: 10, Y: 10}, Max: image.Point{X: 100, Y: 100}},
+					1.0,
+					string(jsonData),
+				),
+			}, nil
+		}
+
+		deps := resource.Dependencies{
+			camera.Named("test-camera"):    mockCam,
+			vision.Named("test-qr-vision"): mockVision,
+		}
+
+		keeper, err := NewKeeper(ctx, deps, resource.NewName(generic.API, "test"), cfg, logger)
+		if err != nil {
+			t.Fatalf("failed to create keeper: %v", err)
+		}
+		defer keeper.Close(ctx)
+
+		svc := keeper.(*inventoryKeeperKeeper)
+
+		// First scan - code appears
+		svc.scanAndCompare(ctx)
+
+		// Change mock to return no detections
+		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{}, nil
+		}
+
+		// Second scan - code disappears
+		svc.scanAndCompare(ctx)
+
+		// Wait for grace period to expire
+		time.Sleep(150 * time.Millisecond)
+
+		// Third scan - grace period expired, code should be removed
+		svc.scanAndCompare(ctx)
+
+		// Code should now be removed
+		svc.monitorMu.Lock()
+		if len(svc.visibleCodes) != 0 {
+			t.Errorf("expected 0 visible codes after grace period, got: %d", len(svc.visibleCodes))
+		}
+		svc.monitorMu.Unlock()
+	})
+
+	t.Run("code reappears during grace period", func(t *testing.T) {
+		disabledInterval := 0
+		gracePeriod := 200 // 200ms grace period
+		cfg := &Config{
+			CameraName:      "test-camera",
+			QRVisionService: "test-qr-vision",
+			ScanIntervalMs:  &disabledInterval,
+			GracePeriodMs:   &gracePeriod,
+		}
+
+		mockCam := &inject.Camera{}
+		mockVision := inject.NewVisionService("test-qr-vision")
+
+		qrData := ItemQRData{ItemID: "item-001", ItemName: "Apple"}
+		jsonData, _ := json.Marshal(qrData)
+
+		// Initially return detection
+		mockVision.DetectionsFunc = func(ctx context.Context, img image.Image, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{}, nil
+		}
+		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{
+				objectdetection.NewDetection(
+					image.Rectangle{Min: image.Point{X: 0, Y: 0}, Max: image.Point{X: 640, Y: 480}},
+					image.Rectangle{Min: image.Point{X: 10, Y: 10}, Max: image.Point{X: 100, Y: 100}},
+					1.0,
+					string(jsonData),
+				),
+			}, nil
+		}
+
+		deps := resource.Dependencies{
+			camera.Named("test-camera"):    mockCam,
+			vision.Named("test-qr-vision"): mockVision,
+		}
+
+		keeper, err := NewKeeper(ctx, deps, resource.NewName(generic.API, "test"), cfg, logger)
+		if err != nil {
+			t.Fatalf("failed to create keeper: %v", err)
+		}
+		defer keeper.Close(ctx)
+
+		svc := keeper.(*inventoryKeeperKeeper)
+
+		// First scan - code appears
+		svc.scanAndCompare(ctx)
+
+		// Change mock to return no detections
+		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{}, nil
+		}
+
+		// Second scan - code disappears
+		svc.scanAndCompare(ctx)
+
+		// Verify code is pending removal
+		svc.monitorMu.Lock()
+		code := svc.visibleCodes[string(jsonData)]
+		if code == nil {
+			t.Fatal("code should exist during grace period")
+		}
+		if !code.PendingRemoval {
+			t.Error("code should be marked as pending removal")
+		}
+		svc.monitorMu.Unlock()
+
+		// Wait a bit but less than grace period
+		time.Sleep(50 * time.Millisecond)
+
+		// Change mock to return detection again (code reappears)
+		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{
+				objectdetection.NewDetection(
+					image.Rectangle{Min: image.Point{X: 0, Y: 0}, Max: image.Point{X: 640, Y: 480}},
+					image.Rectangle{Min: image.Point{X: 10, Y: 10}, Max: image.Point{X: 100, Y: 100}},
+					1.0,
+					string(jsonData),
+				),
+			}, nil
+		}
+
+		// Third scan - code reappears
+		svc.scanAndCompare(ctx)
+
+		// Verify code is no longer pending removal
+		svc.monitorMu.Lock()
+		code = svc.visibleCodes[string(jsonData)]
+		if code == nil {
+			t.Fatal("code should still exist after reappearing")
+		}
+		if code.PendingRemoval {
+			t.Error("code should not be pending removal after reappearing")
+		}
+		svc.monitorMu.Unlock()
+
+		// Change mock to no detections again
+		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{}, nil
+		}
+
+		// Wait for original grace period to expire
+		time.Sleep(200 * time.Millisecond)
+
+		// Scan - code should NOT be removed (grace period was reset)
+		svc.scanAndCompare(ctx)
+
+		svc.monitorMu.Lock()
+		if len(svc.visibleCodes) != 1 {
+			t.Errorf("expected code to still be present (grace period was reset), got: %d codes", len(svc.visibleCodes))
+		}
+		svc.monitorMu.Unlock()
+	})
+
+	t.Run("grace period of 0 causes immediate removal", func(t *testing.T) {
+		disabledInterval := 0
+		gracePeriod := 0 // No grace period
+		cfg := &Config{
+			CameraName:      "test-camera",
+			QRVisionService: "test-qr-vision",
+			ScanIntervalMs:  &disabledInterval,
+			GracePeriodMs:   &gracePeriod,
+		}
+
+		mockCam := &inject.Camera{}
+		mockVision := inject.NewVisionService("test-qr-vision")
+
+		qrData := ItemQRData{ItemID: "item-001", ItemName: "Apple"}
+		jsonData, _ := json.Marshal(qrData)
+
+		// Initially return detection
+		mockVision.DetectionsFunc = func(ctx context.Context, img image.Image, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{}, nil
+		}
+		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{
+				objectdetection.NewDetection(
+					image.Rectangle{Min: image.Point{X: 0, Y: 0}, Max: image.Point{X: 640, Y: 480}},
+					image.Rectangle{Min: image.Point{X: 10, Y: 10}, Max: image.Point{X: 100, Y: 100}},
+					1.0,
+					string(jsonData),
+				),
+			}, nil
+		}
+
+		deps := resource.Dependencies{
+			camera.Named("test-camera"):    mockCam,
+			vision.Named("test-qr-vision"): mockVision,
+		}
+
+		keeper, err := NewKeeper(ctx, deps, resource.NewName(generic.API, "test"), cfg, logger)
+		if err != nil {
+			t.Fatalf("failed to create keeper: %v", err)
+		}
+		defer keeper.Close(ctx)
+
+		svc := keeper.(*inventoryKeeperKeeper)
+
+		// First scan - code appears
+		svc.scanAndCompare(ctx)
+
+		// Verify code was added
+		svc.monitorMu.Lock()
+		if len(svc.visibleCodes) != 1 {
+			t.Errorf("expected 1 visible code, got: %d", len(svc.visibleCodes))
+		}
+		svc.monitorMu.Unlock()
+
+		// Change mock to return no detections
+		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{}, nil
+		}
+
+		// Second scan - code disappears and should be immediately removed (grace period = 0)
+		svc.scanAndCompare(ctx)
+
+		// Code should be removed immediately
+		svc.monitorMu.Lock()
+		if len(svc.visibleCodes) != 0 {
+			t.Errorf("expected 0 visible codes (no grace period), got: %d", len(svc.visibleCodes))
+		}
+		svc.monitorMu.Unlock()
 	})
 }
