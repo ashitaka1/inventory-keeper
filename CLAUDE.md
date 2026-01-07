@@ -115,16 +115,18 @@ All JSON fields available in `cmd map[string]interface{}`. Use `"command"` for r
 
 The system becomes usable for inventory tracking when Phase 4 is complete. This will be released as **v0.1.0** - the first version where you can actually track items on a shelf.
 
-Phases are organizational units for related functionality, not sequential milestones. Development uses semantic versioning going forward.
+**About Phases**: Phases are organizational units for thinking about collections of related functionality. They are not features themselves, not sequential milestones, and not implemented monolithically. A phase can be implemented incrementally over multiple iterations. Development uses semantic versioning to mark actual usability milestones.
 
 ### In Progress
 
 **Phase 4: Inventory Tracking** ← **CURRENT** ← **Target: v0.1.0**
 - In-memory inventory state management
 - Track items on shelf (item registry, stock levels)
-- Basic check-in/check-out operations
-- Manual state transitions (automatic QR→inventory sync is Phase 4.5+)
+- Manual state transitions via commands
+- Automatic state transitions via QR detection events
 - Commands: `add_item`, `remove_item`, `get_inventory`, `checkout_item`, `return_item`
+
+Phase 4 will be implemented incrementally (manual commands first, then automatic transitions), but it's all one phase focused on making inventory tracking work.
 
 ### Completed Phases
 
@@ -180,12 +182,12 @@ Phases are organizational units for related functionality, not sequential milest
   - Alert dashboard with face photos
   - Viam TypeScript SDK integration
 
-### Architecture Notes for Future Phases
-- **Event-Driven**: State transitions triggered by QR detection events
+### Architecture Notes
+- **Event-Driven**: State transitions triggered by QR detection events (Phase 4+)
 - **Modular**: Design for easy extension (webhook → OAuth bot, etc.)
 - **Viam-Native**: Use built-in services (vision, ML, data) vs external dependencies
-- **State Management**: Item states (on_shelf, checked_out, missing) with timestamps
-- **Data Models**: Item, User, Transaction, Alert structs with proper relationships
+- **State Management**: Item states (on_shelf, checked_out in Phase 4; missing added in Phase 6+)
+- **Data Models**: Item (Phase 4), User/Transaction/Alert (Phase 5+)
 
 ## Viam Configuration
 

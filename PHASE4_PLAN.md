@@ -85,9 +85,13 @@ type inventoryKeeperKeeper struct {
 **State Transition Logic:**
 - Manual transitions: `return_item`, `checkout_item` commands
 - Automatic transitions: QR appearance → on_shelf, QR disappearance (after grace period) → checked_out
-- For v0.1.0: Keep it simple with manual commands, automatic transitions deferred to Phase 4.5
+- Implementation approach: Manual commands first (immediately useful), then automatic transitions (completes the working inventory system)
 
 ## Implementation Plan
+
+Phase 4 is implemented incrementally, not monolithically:
+1. **First:** Manual commands (Steps 1-6) - Immediately usable for inventory tracking
+2. **Then:** Automatic QR→inventory sync (Step 7) - Completes the working inventory system
 
 ### Step 1: Add Data Structures
 **File:** `module.go`
@@ -285,6 +289,34 @@ type inventoryKeeperKeeper struct {
 - Verify item is gone from inventory after removal
 - Remove item then try to query it (should not appear in inventory)
 
+### Step 7: Automatic State Transitions
+**Purpose:** Connect QR detection events to inventory state changes
+
+**Implementation:**
+Hook into the existing QR monitoring system (`monitorQRCodes` goroutine) to detect when codes appear/disappear and update inventory automatically.
+
+**Behavior:**
+- When QR code appears (not in `visibleCodes` → added to `visibleCodes`):
+  - Look up item by QR data
+  - If item exists in inventory and is `checked_out` → transition to `on_shelf`, update `CheckedInAt`
+  - Log the automatic check-in
+- When QR code disappears (in `visibleCodes` → grace period expires → removed):
+  - Look up item by QR data
+  - If item exists in inventory and is `on_shelf` → transition to `checked_out`, update `CheckedOutAt`
+  - Log the automatic checkout
+
+**Edge Cases:**
+- QR code for item not in inventory → log warning, no state change
+- Item already in correct state → idempotent, just update timestamp
+- Multiple QR codes for same item → use ItemID from QR data, deduplicate
+
+**Tests:**
+- QR code appears → item transitions to on_shelf
+- QR code disappears → item transitions to checked_out (after grace period)
+- QR code for unknown item → no error, logged warning
+- QR appears when item already on_shelf → timestamp updated
+- QR disappears when item already checked_out → timestamp updated
+
 ## Testing Strategy
 
 ### Unit Tests (module_test.go)
@@ -309,10 +341,11 @@ type inventoryKeeperKeeper struct {
 9. Get inventory - verify item is gone
 
 ### Integration with QR Codes
-For v0.1.0, inventory and QR detection are **independent systems**:
-- Items can be added without QR codes
-- QR codes can be detected without affecting inventory
-- Automatic state transitions deferred to Phase 4.5+
+Phase 4 creates a **complete working inventory system**:
+- Items can be added without QR codes (manual tracking)
+- Manual commands work independently of QR detection
+- Automatic transitions connect QR detection to inventory state (Step 7)
+- Full bidirectional integration: manual commands + automatic QR sync
 
 ## Files to Modify
 
@@ -320,29 +353,32 @@ For v0.1.0, inventory and QR detection are **independent systems**:
    - Add `ItemState` type and constants
    - Add `InventoryItem` struct
    - Add inventory fields to `inventoryKeeperKeeper`
-   - Add 5 new DoCommand handlers
+   - Add 5 new DoCommand handlers (Steps 2-6)
+   - Add automatic state transition logic in `monitorQRCodes` (Step 7)
    - Update `NewKeeper` to initialize inventory
 
 2. **module_test.go**
-   - Add tests for all 5 new commands
+   - Add tests for all 5 manual commands
+   - Add tests for automatic state transitions
    - Add tests for error conditions
-   - Add tests for state transitions
+   - Add tests for state transitions (manual and automatic)
    - Add test helpers for inventory operations
 
 ## Success Criteria
 
 - [ ] All 5 inventory commands implemented and tested
+- [ ] Automatic QR→inventory state transitions implemented and tested
 - [ ] All tests pass (`make test`)
 - [ ] Module builds successfully (`make module`)
 - [ ] Can manually add items via DoCommand
-- [ ] Can checkout/return items and see state changes
+- [ ] Can checkout/return items and see state changes (manual)
+- [ ] Items automatically transition when QR codes appear/disappear
 - [ ] Can query inventory and get accurate counts
 - [ ] Can remove items from inventory
 - [ ] Thread-safe (can handle concurrent inventory operations)
 
-## Non-Goals for v0.1.0 (Future Work)
+## Non-Goals for v0.1.0 (Future Phases)
 
-- ❌ Automatic state transitions based on QR detection (Phase 4.5+)
 - ❌ Persistent storage (Phase 5 - data capture integration)
 - ❌ Transaction history (Phase 5)
 - ❌ Person tracking (Phase 6)
@@ -351,11 +387,6 @@ For v0.1.0, inventory and QR detection are **independent systems**:
 
 ## Next Steps After v0.1.0
 
-Once Phase 4 is complete, good candidates for Phase 4.5:
-1. **Automatic State Transitions:** Connect QR detection to inventory
-   - When QR code appears → auto return if item is checked_out
-   - When QR code disappears → auto checkout if item is on_shelf
-2. **Bulk Operations:** Add multiple items at once
-3. **Inventory Stats:** More detailed analytics and reporting
+Once Phase 4 is complete (manual commands + automatic transitions), v0.1.0 is ready. The system can track inventory on a shelf with full QR integration.
 
-Or proceed directly to Phase 5 (Data Capture & Persistence) to add permanence to the system.
+Proceed to Phase 5 (Data Capture & Persistence) to add permanence and history to the system.
