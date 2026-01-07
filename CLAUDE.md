@@ -137,6 +137,18 @@ Phase 4 will be implemented incrementally (manual commands first, then automatic
 
 ## Future Phases
 
+### Cleanup Interlude (After Phase 4, Before Phase 5)
+Code quality and maintainability improvements:
+- Rename `inventoryKeeperKeeper` to better name
+- Fix deprecated APIs - update to current Viam SDK
+- Refactor test duplication - extract common test helpers
+- Remove conversational comments that reference implementation discussions
+- Rename all test cases to affirmative declarations:
+  - ❌ "missing camera_name returns error"
+  - ✅ "camera_name setting required"
+  - ❌ "duplicate item should fail"
+  - ✅ "duplicate items rejected"
+
 ### Phase 5: Data Capture & Persistence
 - Configure Viam data capture service on face camera
 - `capture_face` command for manual captures with person labeling

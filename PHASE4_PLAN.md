@@ -389,4 +389,15 @@ Phase 4 creates a **complete working inventory system**:
 
 Once Phase 4 is complete (manual commands + automatic transitions), v0.1.0 is ready. The system can track inventory on a shelf with full QR integration.
 
+### Cleanup Interlude (Before Phase 5)
+Before proceeding to Phase 5, clean up the codebase:
+1. **Rename `inventoryKeeperKeeper`** - Find better name (e.g., `keeper`, `service`, `inventoryService`)
+2. **Fix deprecated APIs** - Update to current Viam SDK APIs
+3. **Refactor test duplication** - Extract common test setup code into helpers
+4. **Remove conversational comments** - Delete comments referencing our discussions, keep only code-relevant docs
+5. **Rename test cases to affirmative declarations**:
+   - Change "missing camera_name returns error" → "camera_name setting required"
+   - Change "duplicate item should fail" → "duplicate items rejected"
+   - Apply consistently across all tests
+
 Proceed to Phase 5 (Data Capture & Persistence) to add permanence and history to the system.

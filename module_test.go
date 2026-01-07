@@ -1048,3 +1048,131 @@ func TestDebouncingBehavior(t *testing.T) {
 		svc.monitorMu.Unlock()
 	})
 }
+
+// ========== Feature 1: Inventory Data Model Tests ==========
+
+func TestInventoryKeeperInitialization(t *testing.T) {
+	ctx := context.Background()
+	logger := logging.NewTestLogger(t)
+
+	// Disable background monitoring for this test
+	disabledInterval := 0
+	cfg := &Config{
+		CameraName:      "test-camera",
+		QRVisionService: "test-qr-vision",
+		ScanIntervalMs:  &disabledInterval,
+	}
+
+	mockCam := &inject.Camera{}
+	mockVision := inject.NewVisionService("test-qr-vision")
+
+	// Initialize with empty detections
+	mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+		return []objectdetection.Detection{}, nil
+	}
+
+	deps := resource.Dependencies{
+		camera.Named("test-camera"):    mockCam,
+		vision.Named("test-qr-vision"): mockVision,
+	}
+
+	keeper, err := NewKeeper(ctx, deps, resource.NewName(generic.API, "test"), cfg, logger)
+	if err != nil {
+		t.Fatalf("failed to create keeper: %v", err)
+	}
+	defer keeper.Close(ctx)
+
+	svc := keeper.(*inventoryKeeperKeeper)
+
+	t.Run("inventory map is initialized", func(t *testing.T) {
+		if svc.inventory == nil {
+			t.Error("expected inventory map to be initialized, got nil")
+		}
+	})
+
+	t.Run("inventory starts empty", func(t *testing.T) {
+		svc.inventoryMu.RLock()
+		count := len(svc.inventory)
+		svc.inventoryMu.RUnlock()
+
+		if count != 0 {
+			t.Errorf("expected empty inventory, got %d items", count)
+		}
+	})
+
+	t.Run("inventory mutex exists", func(t *testing.T) {
+		// Test that we can lock and unlock the mutex without panic
+		svc.inventoryMu.Lock()
+		svc.inventoryMu.Unlock()
+
+		svc.inventoryMu.RLock()
+		svc.inventoryMu.RUnlock()
+	})
+}
+
+func TestInventoryConcurrentAccess(t *testing.T) {
+	ctx := context.Background()
+	logger := logging.NewTestLogger(t)
+
+	// Disable background monitoring for this test
+	disabledInterval := 0
+	cfg := &Config{
+		CameraName:      "test-camera",
+		QRVisionService: "test-qr-vision",
+		ScanIntervalMs:  &disabledInterval,
+	}
+
+	mockCam := &inject.Camera{}
+	mockVision := inject.NewVisionService("test-qr-vision")
+
+	mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+		return []objectdetection.Detection{}, nil
+	}
+
+	deps := resource.Dependencies{
+		camera.Named("test-camera"):    mockCam,
+		vision.Named("test-qr-vision"): mockVision,
+	}
+
+	keeper, err := NewKeeper(ctx, deps, resource.NewName(generic.API, "test"), cfg, logger)
+	if err != nil {
+		t.Fatalf("failed to create keeper: %v", err)
+	}
+	defer keeper.Close(ctx)
+
+	svc := keeper.(*inventoryKeeperKeeper)
+
+	t.Run("concurrent reads and writes don't panic", func(t *testing.T) {
+		var wg sync.WaitGroup
+
+		// Spawn multiple goroutines doing concurrent reads
+		for i := 0; i < 10; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				svc.inventoryMu.RLock()
+				_ = len(svc.inventory)
+				svc.inventoryMu.RUnlock()
+			}()
+		}
+
+		// Spawn multiple goroutines doing concurrent writes
+		for i := 0; i < 10; i++ {
+			wg.Add(1)
+			itemID := i
+			go func(id int) {
+				defer wg.Done()
+				svc.inventoryMu.Lock()
+				svc.inventory[string(rune(id))] = &InventoryItem{
+					ItemID:      string(rune(id)),
+					ItemName:    "Test",
+					State:       ItemStateOnShelf,
+					CheckedInAt: time.Now(),
+				}
+				svc.inventoryMu.Unlock()
+			}(itemID)
+		}
+
+		wg.Wait()
+	})
+}

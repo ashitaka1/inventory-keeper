@@ -40,6 +40,19 @@ type DetectedQRCode struct {
 	DisappearedAt  time.Time // When code first went missing (for grace period tracking)
 }
 
+type ItemState string
+
+const (
+	ItemStateOnShelf ItemState = "on_shelf"
+)
+
+type InventoryItem struct {
+	ItemID      string
+	ItemName    string
+	State       ItemState
+	CheckedInAt time.Time
+}
+
 func init() {
 	resource.RegisterService(generic.API, Keeper,
 		resource.Registration[resource.Resource, *Config]{
@@ -126,6 +139,9 @@ type inventoryKeeperKeeper struct {
 	visibleCodes map[string]*DetectedQRCode // Keyed by QR content
 	monitorMu    sync.Mutex                  // Protects visibleCodes
 
+	inventory   map[string]*InventoryItem
+	inventoryMu sync.RWMutex
+
 	cancelCtx  context.Context
 	cancelFunc func()
 }
@@ -163,6 +179,7 @@ func NewKeeper(ctx context.Context, deps resource.Dependencies, name resource.Na
 		camera:          cam,
 		qrVisionService: qrVis,
 		visibleCodes:    make(map[string]*DetectedQRCode),
+		inventory:       make(map[string]*InventoryItem),
 		cancelCtx:       cancelCtx,
 		cancelFunc:      cancelFunc,
 	}
