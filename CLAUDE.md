@@ -109,15 +109,15 @@ All JSON fields available in `cmd map[string]interface{}`. Use `"command"` for r
 6. **Minimal Data Structures**: Only add fields for features we've directly discussed - no speculative fields during prototyping
 7. **Hardware-First**: Test hardware/services in Viam UI before writing code
 
-## Roadmap to MVP
+## Roadmap
 
 1. ✅ **Phase 1: Camera Access** - Access camera from config
 2. ✅ **Phase 2: QR Generation** - Generate codes for items
 3. ✅ **Phase 3: QR Detection** - Scan codes with vision service, continuous monitoring
 4. ✅ **Phase 3.1: Debouncing** - Fix flapping with grace period for disappeared codes
-5. **Phase 4: Inventory Tracking** ← **CURRENT** ← **MVP** - In-memory inventory state, track items on shelf, basic check-in/check-out
+5. **Phase 4: Inventory Tracking** ← **CURRENT** - In-memory inventory state, track items on shelf, basic check-in/check-out
 
-## Future Phases (Post-MVP)
+## Future Phases
 
 ### Phase 5: Data Capture & Persistence
 - Configure Viam data capture service on face camera
