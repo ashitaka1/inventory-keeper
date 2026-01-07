@@ -109,13 +109,29 @@ All JSON fields available in `cmd map[string]interface{}`. Use `"command"` for r
 6. **Minimal Data Structures**: Only add fields for features we've directly discussed - no speculative fields during prototyping
 7. **Hardware-First**: Test hardware/services in Viam UI before writing code
 
-## Roadmap
+## Version Roadmap
+
+**Current Target**: v0.1.0 - First working prototype (Phase 4 complete)
+
+The system becomes usable for inventory tracking when Phase 4 is complete. This will be released as **v0.1.0** - the first version where you can actually track items on a shelf.
+
+Phases are organizational units for related functionality, not sequential milestones. Development uses semantic versioning going forward.
+
+### In Progress
+
+**Phase 4: Inventory Tracking** ← **CURRENT** ← **Target: v0.1.0**
+- In-memory inventory state management
+- Track items on shelf (item registry, stock levels)
+- Basic check-in/check-out operations
+- Connect QR detection events to inventory state changes
+- Commands: `add_item`, `remove_item`, `get_inventory`, `checkout_item`, `return_item`
+
+### Completed Phases
 
 1. ✅ **Phase 1: Camera Access** - Access camera from config
 2. ✅ **Phase 2: QR Generation** - Generate codes for items
 3. ✅ **Phase 3: QR Detection** - Scan codes with vision service, continuous monitoring
 4. ✅ **Phase 3.1: Debouncing** - Fix flapping with grace period for disappeared codes
-5. **Phase 4: Inventory Tracking** ← **CURRENT** - In-memory inventory state, track items on shelf, basic check-in/check-out
 
 ## Future Phases
 
