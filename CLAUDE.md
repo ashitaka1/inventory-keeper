@@ -123,7 +123,7 @@ Phases are organizational units for related functionality, not sequential milest
 - In-memory inventory state management
 - Track items on shelf (item registry, stock levels)
 - Basic check-in/check-out operations
-- Connect QR detection events to inventory state changes
+- Manual state transitions (automatic QR→inventory sync is Phase 4.5+)
 - Commands: `add_item`, `remove_item`, `get_inventory`, `checkout_item`, `return_item`
 
 ### Completed Phases
