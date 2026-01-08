@@ -1789,3 +1789,229 @@ func TestRemoveItemCommand(t *testing.T) {
 		}
 	})
 }
+
+func TestAutomaticInventorySync(t *testing.T) {
+	ctx := context.Background()
+	logger := logging.NewTestLogger(t)
+	logger.SetLevel(logging.ERROR)
+
+	t.Run("QR code appears and item auto-checks in", func(t *testing.T) {
+		disabledInterval := 0
+		cfg := &Config{
+			CameraName:      "test-camera",
+			QRVisionService: "test-qr-vision",
+			ScanIntervalMs:  &disabledInterval,
+		}
+
+		mockCam := &inject.Camera{}
+		mockVision := inject.NewVisionService("test-qr-vision")
+
+		// Create QR data for test item
+		qrData := ItemQRData{ItemID: "test-001", ItemName: "Test Item"}
+		jsonData, _ := json.Marshal(qrData)
+
+		// Mock returns QR detection
+		mockVision.DetectionsFunc = func(ctx context.Context, img image.Image, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{}, nil
+		}
+		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{
+				objectdetection.NewDetection(
+					image.Rectangle{Min: image.Point{X: 0, Y: 0}, Max: image.Point{X: 640, Y: 480}},
+					image.Rectangle{Min: image.Point{X: 10, Y: 10}, Max: image.Point{X: 100, Y: 100}},
+					1.0,
+					string(jsonData),
+				),
+			}, nil
+		}
+
+		deps := resource.Dependencies{
+			camera.Named("test-camera"):    mockCam,
+			vision.Named("test-qr-vision"): mockVision,
+		}
+
+		keeper, err := NewKeeper(ctx, deps, resource.NewName(generic.API, "test"), cfg, logger)
+		if err != nil {
+			t.Fatalf("failed to create keeper: %v", err)
+		}
+		defer keeper.Close(ctx)
+
+		svc := keeper.(*inventoryKeeperKeeper)
+
+		// Add item to inventory in checked_out state
+		baseTime := time.Date(2026, 1, 7, 10, 0, 0, 0, time.UTC)
+		svc.inventoryMu.Lock()
+		svc.inventory["test-001"] = &InventoryItem{
+			ItemID:       "test-001",
+			ItemName:     "Test Item",
+			State:        ItemStateCheckedOut,
+			CheckedOutAt: baseTime,
+		}
+		svc.inventoryMu.Unlock()
+
+		// Trigger scan - QR code appears
+		svc.scanAndCompare(ctx)
+
+		// Verify item transitioned to on_shelf
+		svc.inventoryMu.RLock()
+		item := svc.inventory["test-001"]
+		svc.inventoryMu.RUnlock()
+
+		if item.State != ItemStateOnShelf {
+			t.Errorf("expected item state on_shelf, got: %s", item.State)
+		}
+
+		if item.CheckedInAt.IsZero() {
+			t.Error("expected CheckedInAt to be set")
+		}
+
+		if item.CheckedInAt.Before(baseTime) {
+			t.Error("expected CheckedInAt to be after original CheckedOutAt")
+		}
+	})
+
+	t.Run("QR code disappears and item auto-checks out", func(t *testing.T) {
+		disabledInterval := 0
+		gracePeriod := 100 // 100ms for fast test
+		cfg := &Config{
+			CameraName:      "test-camera",
+			QRVisionService: "test-qr-vision",
+			ScanIntervalMs:  &disabledInterval,
+			GracePeriodMs:   &gracePeriod,
+		}
+
+		mockCam := &inject.Camera{}
+		mockVision := inject.NewVisionService("test-qr-vision")
+
+		qrData := ItemQRData{ItemID: "test-001", ItemName: "Test Item"}
+		jsonData, _ := json.Marshal(qrData)
+
+		// Initially return QR detection
+		mockVision.DetectionsFunc = func(ctx context.Context, img image.Image, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{}, nil
+		}
+		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{
+				objectdetection.NewDetection(
+					image.Rectangle{Min: image.Point{X: 0, Y: 0}, Max: image.Point{X: 640, Y: 480}},
+					image.Rectangle{Min: image.Point{X: 10, Y: 10}, Max: image.Point{X: 100, Y: 100}},
+					1.0,
+					string(jsonData),
+				),
+			}, nil
+		}
+
+		deps := resource.Dependencies{
+			camera.Named("test-camera"):    mockCam,
+			vision.Named("test-qr-vision"): mockVision,
+		}
+
+		keeper, err := NewKeeper(ctx, deps, resource.NewName(generic.API, "test"), cfg, logger)
+		if err != nil {
+			t.Fatalf("failed to create keeper: %v", err)
+		}
+		defer keeper.Close(ctx)
+
+		svc := keeper.(*inventoryKeeperKeeper)
+
+		// Add item to inventory in on_shelf state
+		baseTime := time.Date(2026, 1, 7, 10, 0, 0, 0, time.UTC)
+		svc.inventoryMu.Lock()
+		svc.inventory["test-001"] = &InventoryItem{
+			ItemID:      "test-001",
+			ItemName:    "Test Item",
+			State:       ItemStateOnShelf,
+			CheckedInAt: baseTime,
+		}
+		svc.inventoryMu.Unlock()
+
+		// First scan - QR code visible
+		svc.scanAndCompare(ctx)
+
+		// Change mock to return no detection
+		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{}, nil
+		}
+
+		// Second scan - QR disappears, starts grace period
+		svc.scanAndCompare(ctx)
+
+		// Sleep to exceed grace period
+		time.Sleep(150 * time.Millisecond)
+
+		// Third scan - grace period expired, should remove code
+		svc.scanAndCompare(ctx)
+
+		// Verify item transitioned to checked_out
+		svc.inventoryMu.RLock()
+		item := svc.inventory["test-001"]
+		svc.inventoryMu.RUnlock()
+
+		if item.State != ItemStateCheckedOut {
+			t.Errorf("expected item state checked_out, got: %s", item.State)
+		}
+
+		if item.CheckedOutAt.IsZero() {
+			t.Error("expected CheckedOutAt to be set")
+		}
+
+		if item.CheckedOutAt.Before(baseTime) {
+			t.Error("expected CheckedOutAt to be after original CheckedInAt")
+		}
+	})
+
+	t.Run("QR code for unknown item does not error", func(t *testing.T) {
+		disabledInterval := 0
+		cfg := &Config{
+			CameraName:      "test-camera",
+			QRVisionService: "test-qr-vision",
+			ScanIntervalMs:  &disabledInterval,
+		}
+
+		mockCam := &inject.Camera{}
+		mockVision := inject.NewVisionService("test-qr-vision")
+
+		// QR data for item not in inventory
+		qrData := ItemQRData{ItemID: "unknown-item", ItemName: "Unknown"}
+		jsonData, _ := json.Marshal(qrData)
+
+		mockVision.DetectionsFunc = func(ctx context.Context, img image.Image, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{}, nil
+		}
+		mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+			return []objectdetection.Detection{
+				objectdetection.NewDetection(
+					image.Rectangle{Min: image.Point{X: 0, Y: 0}, Max: image.Point{X: 640, Y: 480}},
+					image.Rectangle{Min: image.Point{X: 10, Y: 10}, Max: image.Point{X: 100, Y: 100}},
+					1.0,
+					string(jsonData),
+				),
+			}, nil
+		}
+
+		deps := resource.Dependencies{
+			camera.Named("test-camera"):    mockCam,
+			vision.Named("test-qr-vision"): mockVision,
+		}
+
+		keeper, err := NewKeeper(ctx, deps, resource.NewName(generic.API, "test"), cfg, logger)
+		if err != nil {
+			t.Fatalf("failed to create keeper: %v", err)
+		}
+		defer keeper.Close(ctx)
+
+		svc := keeper.(*inventoryKeeperKeeper)
+
+		// Trigger scan - should not error despite unknown item
+		svc.scanAndCompare(ctx)
+
+		// Verify no item was added to inventory
+		svc.inventoryMu.RLock()
+		inventorySize := len(svc.inventory)
+		svc.inventoryMu.RUnlock()
+
+		if inventorySize != 0 {
+			t.Errorf("expected empty inventory, got %d items", inventorySize)
+		}
+	})
+}
