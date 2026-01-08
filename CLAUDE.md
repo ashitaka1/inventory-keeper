@@ -45,6 +45,16 @@ Viam module for automated shelf inventory tracking using QR codes and facial rec
 - Comprehensive tests for all debouncing scenarios
 - Eliminates "flapping" from intermittent camera/lighting issues
 
+**Phase 4 Complete** ✅ - Inventory Tracking
+- In-memory inventory state management with `InventoryItem` struct
+- Item states: `on_shelf`, `checked_out`
+- Manual state transitions: `add_item`, `remove_item`, `checkout_item`, `return_item`
+- Automatic state transitions based on QR code detection events
+- QR code appears → item auto-checks in (transitions to `on_shelf`)
+- QR code disappears → item auto-checks out (transitions to `checked_out`)
+- `get_inventory` command with optional state filtering
+- Comprehensive test coverage for manual and automatic workflows
+
 ## Commands
 
 ```bash
@@ -87,6 +97,11 @@ Current commands:
 {"command": "ping"}
 {"command": "echo", "message": "hello"}
 {"command": "generate_qr", "item_id": "item-001", "item_name": "Apple"}
+{"command": "add_item", "item_id": "item-001", "item_name": "Apple"}
+{"command": "remove_item", "item_id": "item-001"}
+{"command": "get_inventory", "state": "on_shelf"}
+{"command": "checkout_item", "item_id": "item-001"}
+{"command": "return_item", "item_id": "item-001"}
 ```
 
 All JSON fields available in `cmd map[string]interface{}`. Use `"command"` for routing, other fields are handler-specific arguments.
@@ -111,22 +126,11 @@ All JSON fields available in `cmd map[string]interface{}`. Use `"command"` for r
 
 ## Version Roadmap
 
-**Current Target**: v0.1.0 - First working prototype (Phase 4 complete)
+**Current Status**: v0.1.0 ready - First working prototype complete!
 
-The system becomes usable for inventory tracking when Phase 4 is complete. This will be released as **v0.1.0** - the first version where you can actually track items on a shelf.
+Phase 4 is now complete. The system is usable for basic inventory tracking - you can track items on a shelf with automatic state transitions based on QR code detection.
 
 **About Phases**: Phases are organizational units for thinking about collections of related functionality. They are not features themselves, not sequential milestones, and not implemented monolithically. A phase can be implemented incrementally over multiple iterations. Development uses semantic versioning to mark actual usability milestones.
-
-### In Progress
-
-**Phase 4: Inventory Tracking** ← **CURRENT** ← **Target: v0.1.0**
-- In-memory inventory state management
-- Track items on shelf (item registry, stock levels)
-- Manual state transitions via commands
-- Automatic state transitions via QR detection events
-- Commands: `add_item`, `remove_item`, `get_inventory`, `checkout_item`, `return_item`
-
-Phase 4 will be implemented incrementally (manual commands first, then automatic transitions), but it's all one phase focused on making inventory tracking work.
 
 ### Completed Phases
 
@@ -134,6 +138,7 @@ Phase 4 will be implemented incrementally (manual commands first, then automatic
 2. ✅ **Phase 2: QR Generation** - Generate codes for items
 3. ✅ **Phase 3: QR Detection** - Scan codes with vision service, continuous monitoring
 4. ✅ **Phase 3.1: Debouncing** - Fix flapping with grace period for disappeared codes
+5. ✅ **Phase 4: Inventory Tracking** - In-memory inventory state management, manual and automatic state transitions
 
 ## Future Phases
 

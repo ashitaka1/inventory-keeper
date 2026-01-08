@@ -23,7 +23,6 @@ var (
 )
 
 // ItemQRData represents the data encoded in a QR code for an inventory item
-// Fields are added only as features require them - start minimal
 type ItemQRData struct {
 	ItemID   string `json:"item_id"`
 	ItemName string `json:"item_name"`
@@ -67,12 +66,6 @@ type Config struct {
 	// - positive value: custom grace period
 	// This prevents false "disappeared" events from temporary detection failures
 	GracePeriodMs *int `json:"grace_period_ms,omitempty"`
-
-	// Future config fields will be added incrementally as features are implemented:
-	// - Vision service for facial recognition
-	// - Face camera for person detection
-	// - Optional integrations (streamdeck, slack_webhook_url)
-	// - Timing configuration (check_in_delay_seconds, theft_alert_delay_seconds)
 }
 
 // Validate ensures all parts of the config are valid and important fields exist.
@@ -351,6 +344,15 @@ func (s *inventoryKeeperKeeper) scanAndCompare(ctx context.Context) {
 			// New code appeared
 			if itemID != "" {
 				s.logger.Debugf("QR code appeared: %s (%s)", itemID, itemName)
+
+				s.inventoryMu.Lock()
+				if item, found := s.inventory[itemID]; found && item.State == ItemStateCheckedOut {
+					item.State = ItemStateOnShelf
+					item.CheckedInAt = now
+					item.CheckedOutAt = time.Time{}
+					s.logger.Infof("Auto check-in: %s (%s) - QR code appeared on shelf", itemID, itemName)
+				}
+				s.inventoryMu.Unlock()
 			} else {
 				s.logger.Debugf("QR code appeared: unknown content - %s", content)
 			}
@@ -415,7 +417,18 @@ func (s *inventoryKeeperKeeper) scanAndCompare(ctx context.Context) {
 
 	// Remove codes that have exceeded grace period
 	for _, content := range toRemove {
+		code := s.visibleCodes[content]
 		delete(s.visibleCodes, content)
+
+		if code.ItemID != "" {
+			s.inventoryMu.Lock()
+			if item, found := s.inventory[code.ItemID]; found && item.State == ItemStateOnShelf {
+				item.State = ItemStateCheckedOut
+				item.CheckedOutAt = now
+				s.logger.Infof("Auto check-out: %s (%s) - QR code removed from shelf", code.ItemID, code.ItemName)
+			}
+			s.inventoryMu.Unlock()
+		}
 	}
 	s.monitorMu.Unlock()
 }
