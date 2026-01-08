@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"image"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -98,6 +99,7 @@ func TestConfigValidate(t *testing.T) {
 func TestDoCommand(t *testing.T) {
 	ctx := context.Background()
 	logger := logging.NewTestLogger(t)
+	logger.SetLevel(logging.ERROR)
 
 	// Explicitly disable background monitoring for this test
 	disabledInterval := 0
@@ -186,6 +188,7 @@ func TestDoCommand(t *testing.T) {
 func TestGenerateQR(t *testing.T) {
 	ctx := context.Background()
 	logger := logging.NewTestLogger(t)
+	logger.SetLevel(logging.ERROR)
 
 	// Explicitly disable background monitoring for this test
 	disabledInterval := 0
@@ -296,6 +299,7 @@ func TestGenerateQR(t *testing.T) {
 func TestScanAndCompare(t *testing.T) {
 	ctx := context.Background()
 	logger := logging.NewTestLogger(t)
+	logger.SetLevel(logging.ERROR)
 
 	// Explicitly disable background monitoring for this test
 	disabledInterval := 0
@@ -550,6 +554,7 @@ func TestScanAndCompare(t *testing.T) {
 func TestMonitoringStartBehavior(t *testing.T) {
 	ctx := context.Background()
 	logger := logging.NewTestLogger(t)
+	logger.SetLevel(logging.ERROR)
 
 	t.Run("monitoring starts when ScanIntervalMs is nil", func(t *testing.T) {
 		// Track if DetectionsFromCamera was called
@@ -705,6 +710,7 @@ func TestMonitoringStartBehavior(t *testing.T) {
 func TestDebouncingBehavior(t *testing.T) {
 	ctx := context.Background()
 	logger := logging.NewTestLogger(t)
+	logger.SetLevel(logging.ERROR)
 
 	t.Run("code remains visible during grace period", func(t *testing.T) {
 		// Explicitly disable background monitoring for this test
@@ -1054,6 +1060,7 @@ func TestDebouncingBehavior(t *testing.T) {
 func TestInventoryKeeperInitialization(t *testing.T) {
 	ctx := context.Background()
 	logger := logging.NewTestLogger(t)
+	logger.SetLevel(logging.ERROR)
 
 	// Disable background monitoring for this test
 	disabledInterval := 0
@@ -1113,6 +1120,7 @@ func TestInventoryKeeperInitialization(t *testing.T) {
 func TestInventoryConcurrentAccess(t *testing.T) {
 	ctx := context.Background()
 	logger := logging.NewTestLogger(t)
+	logger.SetLevel(logging.ERROR)
 
 	// Disable background monitoring for this test
 	disabledInterval := 0
@@ -1174,5 +1182,610 @@ func TestInventoryConcurrentAccess(t *testing.T) {
 		}
 
 		wg.Wait()
+	})
+}
+
+func TestAddItemCommand(t *testing.T) {
+	ctx := context.Background()
+	logger := logging.NewTestLogger(t)
+	logger.SetLevel(logging.ERROR)
+
+	disabledInterval := 0
+	cfg := &Config{
+		CameraName:      "test-camera",
+		QRVisionService: "test-qr-vision",
+		ScanIntervalMs:  &disabledInterval,
+	}
+
+	mockCam := &inject.Camera{}
+	mockVision := inject.NewVisionService("test-qr-vision")
+	mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+		return []objectdetection.Detection{}, nil
+	}
+
+	deps := resource.Dependencies{
+		camera.Named("test-camera"):    mockCam,
+		vision.Named("test-qr-vision"): mockVision,
+	}
+
+	keeper, err := NewKeeper(ctx, deps, resource.NewName(generic.API, "test"), cfg, logger)
+	if err != nil {
+		t.Fatalf("failed to create keeper: %v", err)
+	}
+	defer keeper.Close(ctx)
+
+	svc := keeper.(*inventoryKeeperKeeper)
+
+	t.Run("new item added successfully", func(t *testing.T) {
+		result, err := svc.DoCommand(ctx, map[string]interface{}{
+			"command":   "add_item",
+			"item_id":   "test-001",
+			"item_name": "Test Item",
+		})
+		if err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+
+		// Validate timestamp separately
+		checkedInStr, ok := result["checked_in_at"].(string)
+		if !ok {
+			t.Fatal("expected checked_in_at to be string")
+		}
+		checkedInAt, err := time.Parse(time.RFC3339, checkedInStr)
+		if err != nil {
+			t.Fatalf("failed to parse checked_in_at: %v", err)
+		}
+		if time.Since(checkedInAt) > 5*time.Second {
+			t.Errorf("checked_in_at timestamp not recent: %v", checkedInAt)
+		}
+
+		// Copy result and remove timestamp for comparison
+		resultWithoutTimestamp := make(map[string]interface{})
+		for k, v := range result {
+			resultWithoutTimestamp[k] = v
+		}
+		delete(resultWithoutTimestamp, "checked_in_at")
+
+		expected := map[string]interface{}{
+			"item_id":   "test-001",
+			"item_name": "Test Item",
+			"state":     "on_shelf",
+		}
+		if !reflect.DeepEqual(resultWithoutTimestamp, expected) {
+			t.Errorf("result mismatch:\ngot:  %+v\nwant: %+v", resultWithoutTimestamp, expected)
+		}
+
+		// Validate actual inventory state
+		svc.inventoryMu.RLock()
+		if len(svc.inventory) != 1 {
+			t.Errorf("expected 1 item in inventory, got %d", len(svc.inventory))
+		}
+		item, exists := svc.inventory["test-001"]
+		if !exists {
+			t.Fatal("item test-001 not found in inventory")
+		}
+		if item.ItemID != "test-001" || item.ItemName != "Test Item" || item.State != ItemStateOnShelf || item.CheckedInAt.IsZero() {
+			t.Errorf("inventory state incorrect: %+v", item)
+		}
+		svc.inventoryMu.RUnlock()
+	})
+
+	t.Run("duplicate items rejected", func(t *testing.T) {
+		_, err := svc.DoCommand(ctx, map[string]interface{}{
+			"command":   "add_item",
+			"item_id":   "test-001",
+			"item_name": "Duplicate Item",
+		})
+		if err == nil {
+			t.Error("expected error for duplicate item_id")
+		}
+	})
+
+	t.Run("item_id field required", func(t *testing.T) {
+		_, err := svc.DoCommand(ctx, map[string]interface{}{
+			"command":   "add_item",
+			"item_name": "No ID Item",
+		})
+		if err == nil {
+			t.Error("expected error for missing item_id")
+		}
+	})
+
+	t.Run("item_name field required", func(t *testing.T) {
+		_, err := svc.DoCommand(ctx, map[string]interface{}{
+			"command": "add_item",
+			"item_id": "test-002",
+		})
+		if err == nil {
+			t.Error("expected error for missing item_name")
+		}
+	})
+}
+
+func TestGetInventoryCommand(t *testing.T) {
+	ctx := context.Background()
+	logger := logging.NewTestLogger(t)
+	logger.SetLevel(logging.ERROR)
+
+	disabledInterval := 0
+	cfg := &Config{
+		CameraName:      "test-camera",
+		QRVisionService: "test-qr-vision",
+		ScanIntervalMs:  &disabledInterval,
+	}
+
+	mockCam := &inject.Camera{}
+	mockVision := inject.NewVisionService("test-qr-vision")
+	mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+		return []objectdetection.Detection{}, nil
+	}
+
+	deps := resource.Dependencies{
+		camera.Named("test-camera"):    mockCam,
+		vision.Named("test-qr-vision"): mockVision,
+	}
+
+	keeper, err := NewKeeper(ctx, deps, resource.NewName(generic.API, "test"), cfg, logger)
+	if err != nil {
+		t.Fatalf("failed to create keeper: %v", err)
+	}
+	defer keeper.Close(ctx)
+
+	svc := keeper.(*inventoryKeeperKeeper)
+
+	t.Run("empty inventory has zero items and counts", func(t *testing.T) {
+		result, err := svc.DoCommand(ctx, map[string]interface{}{
+			"command": "get_inventory",
+		})
+		if err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+
+		items := result["items"].([]interface{})
+		if len(items) != 0 {
+			t.Errorf("expected empty items array, got %d items", len(items))
+		}
+
+		if result["total_count"] != 0 {
+			t.Errorf("expected total_count 0, got: %v", result["total_count"])
+		}
+		if result["on_shelf_count"] != 0 {
+			t.Errorf("expected on_shelf_count 0, got: %v", result["on_shelf_count"])
+		}
+		if result["checked_out_count"] != 0 {
+			t.Errorf("expected checked_out_count 0, got: %v", result["checked_out_count"])
+		}
+	})
+
+	t.Run("inventory lists all items with accurate counts", func(t *testing.T) {
+		svc.inventoryMu.Lock()
+		svc.inventory["apple-001"] = &InventoryItem{
+			ItemID:      "apple-001",
+			ItemName:    "Apple",
+			State:       ItemStateOnShelf,
+			CheckedInAt: time.Now(),
+		}
+		svc.inventory["banana-001"] = &InventoryItem{
+			ItemID:       "banana-001",
+			ItemName:     "Banana",
+			State:        ItemStateCheckedOut,
+			CheckedOutAt: time.Now(),
+		}
+		svc.inventoryMu.Unlock()
+
+		result, err := svc.DoCommand(ctx, map[string]interface{}{
+			"command": "get_inventory",
+		})
+		if err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+
+		items := result["items"].([]interface{})
+		if len(items) != 2 {
+			t.Errorf("expected 2 items, got %d", len(items))
+		}
+
+		if result["total_count"] != 2 {
+			t.Errorf("expected total_count 2, got: %v", result["total_count"])
+		}
+		if result["on_shelf_count"] != 1 {
+			t.Errorf("expected on_shelf_count 1, got: %v", result["on_shelf_count"])
+		}
+		if result["checked_out_count"] != 1 {
+			t.Errorf("expected checked_out_count 1, got: %v", result["checked_out_count"])
+		}
+	})
+
+	t.Run("state filter returns matching items only", func(t *testing.T) {
+		result, err := svc.DoCommand(ctx, map[string]interface{}{
+			"command": "get_inventory",
+			"state":   "on_shelf",
+		})
+		if err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+
+		items := result["items"].([]interface{})
+		if len(items) != 1 {
+			t.Errorf("expected 1 on_shelf item, got %d items", len(items))
+		}
+
+		for _, item := range items {
+			itemMap := item.(map[string]interface{})
+			if itemMap["state"] != "on_shelf" {
+				t.Errorf("expected all items to have state 'on_shelf', got: %v", itemMap["state"])
+			}
+			if itemMap["item_id"] != "apple-001" {
+				t.Errorf("expected apple-001, got: %v", itemMap["item_id"])
+			}
+		}
+
+		if result["total_count"] != 1 {
+			t.Errorf("expected total_count 1 (filtered), got: %v", result["total_count"])
+		}
+	})
+}
+
+func TestCheckoutItemCommand(t *testing.T) {
+	ctx := context.Background()
+	logger := logging.NewTestLogger(t)
+	logger.SetLevel(logging.ERROR)
+
+	disabledInterval := 0
+	cfg := &Config{
+		CameraName:      "test-camera",
+		QRVisionService: "test-qr-vision",
+		ScanIntervalMs:  &disabledInterval,
+	}
+
+	mockCam := &inject.Camera{}
+	mockVision := inject.NewVisionService("test-qr-vision")
+	mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+		return []objectdetection.Detection{}, nil
+	}
+
+	deps := resource.Dependencies{
+		camera.Named("test-camera"):    mockCam,
+		vision.Named("test-qr-vision"): mockVision,
+	}
+
+	keeper, err := NewKeeper(ctx, deps, resource.NewName(generic.API, "test"), cfg, logger)
+	if err != nil {
+		t.Fatalf("failed to create keeper: %v", err)
+	}
+	defer keeper.Close(ctx)
+
+	svc := keeper.(*inventoryKeeperKeeper)
+
+	baseTime := time.Date(2026, 1, 7, 10, 0, 0, 0, time.UTC)
+	svc.inventoryMu.Lock()
+	svc.inventory["test-001"] = &InventoryItem{
+		ItemID:      "test-001",
+		ItemName:    "Test Item",
+		State:       ItemStateOnShelf,
+		CheckedInAt: baseTime,
+	}
+	svc.inventoryMu.Unlock()
+
+	var firstCheckoutTime time.Time
+
+	t.Run("item checked out successfully", func(t *testing.T) {
+		result, err := svc.DoCommand(ctx, map[string]interface{}{
+			"command": "checkout_item",
+			"item_id": "test-001",
+		})
+		if err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+
+		// Extract and validate timestamp separately
+		checkedOutStr, ok := result["checked_out_at"].(string)
+		if !ok {
+			t.Fatal("expected checked_out_at to be string")
+		}
+		checkedOutAt, err := time.Parse(time.RFC3339, checkedOutStr)
+		if err != nil {
+			t.Fatalf("failed to parse checked_out_at: %v", err)
+		}
+		if time.Since(checkedOutAt) > 5*time.Second {
+			t.Errorf("checked_out_at timestamp not recent: %v", checkedOutAt)
+		}
+		firstCheckoutTime = checkedOutAt
+
+		// Copy result and remove timestamp for comparison
+		resultWithoutTimestamp := make(map[string]interface{})
+		for k, v := range result {
+			resultWithoutTimestamp[k] = v
+		}
+		delete(resultWithoutTimestamp, "checked_out_at")
+
+		expected := map[string]interface{}{
+			"item_id":        "test-001",
+			"item_name":      "Test Item",
+			"state":          "checked_out",
+			"previous_state": "on_shelf",
+		}
+		if !reflect.DeepEqual(resultWithoutTimestamp, expected) {
+			t.Errorf("result mismatch:\ngot:  %+v\nwant: %+v", resultWithoutTimestamp, expected)
+		}
+	})
+
+	t.Run("repeated checkout updates timestamp", func(t *testing.T) {
+		time.Sleep(1100 * time.Millisecond) // Ensure different second for RFC3339 precision
+		result, err := svc.DoCommand(ctx, map[string]interface{}{
+			"command": "checkout_item",
+			"item_id": "test-001",
+		})
+		if err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+
+		// Extract and validate timestamp is after first checkout
+		checkedOutStr, ok := result["checked_out_at"].(string)
+		if !ok {
+			t.Fatal("expected checked_out_at to be a string")
+		}
+		checkedOutAt, err := time.Parse(time.RFC3339, checkedOutStr)
+		if err != nil {
+			t.Fatalf("failed to parse checked_out_at: %v", err)
+		}
+		if !checkedOutAt.After(firstCheckoutTime) {
+			t.Errorf("repeated checkout timestamp %v not after first checkout %v", checkedOutAt, firstCheckoutTime)
+		}
+
+		// Copy result and remove timestamp for comparison
+		resultWithoutTimestamp := make(map[string]interface{})
+		for k, v := range result {
+			resultWithoutTimestamp[k] = v
+		}
+		delete(resultWithoutTimestamp, "checked_out_at")
+
+		expected := map[string]interface{}{
+			"item_id":        "test-001",
+			"item_name":      "Test Item",
+			"state":          "checked_out",
+			"previous_state": "checked_out",
+		}
+		if !reflect.DeepEqual(resultWithoutTimestamp, expected) {
+			t.Errorf("result mismatch:\ngot:  %+v\nwant: %+v", resultWithoutTimestamp, expected)
+		}
+	})
+
+	t.Run("non-existent item rejected", func(t *testing.T) {
+		_, err := svc.DoCommand(ctx, map[string]interface{}{
+			"command": "checkout_item",
+			"item_id": "does-not-exist",
+		})
+		if err == nil {
+			t.Error("expected error for non-existent item")
+		}
+	})
+}
+
+func TestReturnItemCommand(t *testing.T) {
+	ctx := context.Background()
+	logger := logging.NewTestLogger(t)
+	logger.SetLevel(logging.ERROR)
+
+	disabledInterval := 0
+	cfg := &Config{
+		CameraName:      "test-camera",
+		QRVisionService: "test-qr-vision",
+		ScanIntervalMs:  &disabledInterval,
+	}
+
+	mockCam := &inject.Camera{}
+	mockVision := inject.NewVisionService("test-qr-vision")
+	mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+		return []objectdetection.Detection{}, nil
+	}
+
+	deps := resource.Dependencies{
+		camera.Named("test-camera"):    mockCam,
+		vision.Named("test-qr-vision"): mockVision,
+	}
+
+	keeper, err := NewKeeper(ctx, deps, resource.NewName(generic.API, "test"), cfg, logger)
+	if err != nil {
+		t.Fatalf("failed to create keeper: %v", err)
+	}
+	defer keeper.Close(ctx)
+
+	svc := keeper.(*inventoryKeeperKeeper)
+
+	// Setup test item in checked_out state
+	baseTime := time.Date(2026, 1, 7, 10, 0, 0, 0, time.UTC)
+	svc.inventoryMu.Lock()
+	svc.inventory["test-001"] = &InventoryItem{
+		ItemID:       "test-001",
+		ItemName:     "Test Item",
+		State:        ItemStateCheckedOut,
+		CheckedOutAt: baseTime,
+	}
+	svc.inventoryMu.Unlock()
+
+	var firstReturnTime time.Time
+
+	t.Run("item returned successfully", func(t *testing.T) {
+		result, err := svc.DoCommand(ctx, map[string]interface{}{
+			"command": "return_item",
+			"item_id": "test-001",
+		})
+		if err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+
+		// Extract and validate timestamp separately
+		checkedInStr, ok := result["checked_in_at"].(string)
+		if !ok {
+			t.Fatal("expected checked_in_at to be a string")
+		}
+		checkedInAt, err := time.Parse(time.RFC3339, checkedInStr)
+		if err != nil {
+			t.Fatalf("failed to parse checked_in_at: %v", err)
+		}
+		if time.Since(checkedInAt) > 5*time.Second {
+			t.Errorf("checked_in_at timestamp not recent: %v", checkedInAt)
+		}
+		firstReturnTime = checkedInAt
+
+		// Copy result and remove timestamp for comparison
+		resultWithoutTimestamp := make(map[string]interface{})
+		for k, v := range result {
+			resultWithoutTimestamp[k] = v
+		}
+		delete(resultWithoutTimestamp, "checked_in_at")
+
+		expected := map[string]interface{}{
+			"item_id":        "test-001",
+			"item_name":      "Test Item",
+			"state":          "on_shelf",
+			"previous_state": "checked_out",
+		}
+		if !reflect.DeepEqual(resultWithoutTimestamp, expected) {
+			t.Errorf("result mismatch:\ngot:  %+v\nwant: %+v", resultWithoutTimestamp, expected)
+		}
+
+		// Verify actual inventory state has CheckedOutAt cleared
+		svc.inventoryMu.RLock()
+		item := svc.inventory["test-001"]
+		svc.inventoryMu.RUnlock()
+		if !item.CheckedOutAt.IsZero() {
+			t.Errorf("CheckedOutAt should be zero after return, got: %v", item.CheckedOutAt)
+		}
+	})
+
+	t.Run("repeated return updates timestamp", func(t *testing.T) {
+		time.Sleep(1100 * time.Millisecond) // Ensure different second for RFC3339 precision
+		result, err := svc.DoCommand(ctx, map[string]interface{}{
+			"command": "return_item",
+			"item_id": "test-001",
+		})
+		if err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+
+		// Extract and validate timestamp is after first return
+		checkedInStr, ok := result["checked_in_at"].(string)
+		if !ok {
+			t.Fatal("expected checked_in_at to be a string")
+		}
+		checkedInAt, err := time.Parse(time.RFC3339, checkedInStr)
+		if err != nil {
+			t.Fatalf("failed to parse checked_in_at: %v", err)
+		}
+		if !checkedInAt.After(firstReturnTime) {
+			t.Errorf("repeated return timestamp %v not after first return %v", checkedInAt, firstReturnTime)
+		}
+
+		// Copy result and remove timestamp for comparison
+		resultWithoutTimestamp := make(map[string]interface{})
+		for k, v := range result {
+			resultWithoutTimestamp[k] = v
+		}
+		delete(resultWithoutTimestamp, "checked_in_at")
+
+		expected := map[string]interface{}{
+			"item_id":        "test-001",
+			"item_name":      "Test Item",
+			"state":          "on_shelf",
+			"previous_state": "on_shelf",
+		}
+		if !reflect.DeepEqual(resultWithoutTimestamp, expected) {
+			t.Errorf("result mismatch:\ngot:  %+v\nwant: %+v", resultWithoutTimestamp, expected)
+		}
+
+		// Verify actual inventory state has CheckedOutAt cleared
+		svc.inventoryMu.RLock()
+		item := svc.inventory["test-001"]
+		svc.inventoryMu.RUnlock()
+		if !item.CheckedOutAt.IsZero() {
+			t.Errorf("CheckedOutAt should be zero after return, got: %v", item.CheckedOutAt)
+		}
+	})
+
+	t.Run("non-existent item rejected", func(t *testing.T) {
+		_, err := svc.DoCommand(ctx, map[string]interface{}{
+			"command": "return_item",
+			"item_id": "does-not-exist",
+		})
+		if err == nil {
+			t.Error("expected error for non-existent item")
+		}
+	})
+}
+
+func TestRemoveItemCommand(t *testing.T) {
+	ctx := context.Background()
+	logger := logging.NewTestLogger(t)
+	logger.SetLevel(logging.ERROR)
+
+	disabledInterval := 0
+	cfg := &Config{
+		CameraName:      "test-camera",
+		QRVisionService: "test-qr-vision",
+		ScanIntervalMs:  &disabledInterval,
+	}
+
+	mockCam := &inject.Camera{}
+	mockVision := inject.NewVisionService("test-qr-vision")
+	mockVision.DetectionsFromCameraFunc = func(ctx context.Context, cameraName string, extra map[string]interface{}) ([]objectdetection.Detection, error) {
+		return []objectdetection.Detection{}, nil
+	}
+
+	deps := resource.Dependencies{
+		camera.Named("test-camera"):    mockCam,
+		vision.Named("test-qr-vision"): mockVision,
+	}
+
+	keeper, err := NewKeeper(ctx, deps, resource.NewName(generic.API, "test"), cfg, logger)
+	if err != nil {
+		t.Fatalf("failed to create keeper: %v", err)
+	}
+	defer keeper.Close(ctx)
+
+	svc := keeper.(*inventoryKeeperKeeper)
+
+	// Setup test item in inventory
+	svc.inventoryMu.Lock()
+	svc.inventory["test-001"] = &InventoryItem{
+		ItemID:      "test-001",
+		ItemName:    "Test Item",
+		State:       ItemStateOnShelf,
+		CheckedInAt: time.Now(),
+	}
+	svc.inventoryMu.Unlock()
+
+	t.Run("item removed successfully", func(t *testing.T) {
+		result, err := svc.DoCommand(ctx, map[string]interface{}{
+			"command": "remove_item",
+			"item_id": "test-001",
+		})
+		if err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+
+		if result["removed"] != true {
+			t.Error("expected removed to be true")
+		}
+
+		// Verify item is gone
+		_, err = svc.DoCommand(ctx, map[string]interface{}{
+			"command": "checkout_item",
+			"item_id": "test-001",
+		})
+		if err == nil {
+			t.Error("expected error when accessing removed item")
+		}
+	})
+
+	t.Run("non-existent item rejected", func(t *testing.T) {
+		_, err := svc.DoCommand(ctx, map[string]interface{}{
+			"command": "remove_item",
+			"item_id": "does-not-exist",
+		})
+		if err == nil {
+			t.Error("expected error for non-existent item")
+		}
 	})
 }

@@ -108,6 +108,7 @@ All JSON fields available in `cmd map[string]interface{}`. Use `"command"` for r
 5. **Mock Wisely**: Mock complex integrations, not trivial operations
 6. **Minimal Data Structures**: Only add fields for features we've directly discussed - no speculative fields during prototyping
 7. **Hardware-First**: Test hardware/services in Viam UI before writing code
+8. **TDD Workflow**: When operating in TDD mode, only fix the errors the tests are complaining about. Do not return errors in stubs - return things the tests will actually catch and complain about (rather than generic "expected no error, got an error"), like empty arrays, zero values, or nil. This produces more informative test failures.
 
 ## Version Roadmap
 

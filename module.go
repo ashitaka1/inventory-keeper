@@ -43,14 +43,16 @@ type DetectedQRCode struct {
 type ItemState string
 
 const (
-	ItemStateOnShelf ItemState = "on_shelf"
+	ItemStateOnShelf    ItemState = "on_shelf"
+	ItemStateCheckedOut ItemState = "checked_out"
 )
 
 type InventoryItem struct {
-	ItemID      string
-	ItemName    string
-	State       ItemState
-	CheckedInAt time.Time
+	ItemID       string
+	ItemName     string
+	State        ItemState
+	CheckedInAt  time.Time
+	CheckedOutAt time.Time
 }
 
 func init() {
@@ -222,6 +224,172 @@ func (s *inventoryKeeperKeeper) DoCommand(ctx context.Context, cmd map[string]in
 	case "generate_qr":
 		// Generate QR code for an inventory item
 		return s.handleGenerateQR(ctx, cmd)
+
+	case "add_item":
+		itemID, ok := cmd["item_id"].(string)
+		if !ok || itemID == "" {
+			return nil, errors.New("item_id is required and must be a string")
+		}
+
+		itemName, ok := cmd["item_name"].(string)
+		if !ok || itemName == "" {
+			return nil, errors.New("item_name is required and must be a string")
+		}
+
+		s.inventoryMu.Lock()
+		if _, exists := s.inventory[itemID]; exists {
+			s.inventoryMu.Unlock()
+			return nil, fmt.Errorf("item with id %s already exists", itemID)
+		}
+
+		now := time.Now()
+		item := &InventoryItem{
+			ItemID:      itemID,
+			ItemName:    itemName,
+			State:       ItemStateOnShelf,
+			CheckedInAt: now,
+		}
+		s.inventory[itemID] = item
+		s.inventoryMu.Unlock()
+
+		s.logger.Infof("Added item to inventory: %s (%s)", itemID, itemName)
+
+		return map[string]interface{}{
+			"item_id":       itemID,
+			"item_name":     itemName,
+			"state":         string(ItemStateOnShelf),
+			"checked_in_at": now.Format(time.RFC3339),
+		}, nil
+
+	case "get_inventory":
+		var stateFilter *ItemState
+		if stateStr, ok := cmd["state"].(string); ok && stateStr != "" {
+			state := ItemState(stateStr)
+			stateFilter = &state
+		}
+
+		s.inventoryMu.RLock()
+		defer s.inventoryMu.RUnlock()
+
+		items := []interface{}{}
+		onShelfCount := 0
+		checkedOutCount := 0
+
+		for _, item := range s.inventory {
+			if stateFilter != nil && item.State != *stateFilter {
+				continue
+			}
+
+			itemMap := map[string]interface{}{
+				"item_id":   item.ItemID,
+				"item_name": item.ItemName,
+				"state":     string(item.State),
+			}
+
+			if item.State == ItemStateOnShelf {
+				itemMap["checked_in_at"] = item.CheckedInAt.Format(time.RFC3339)
+				onShelfCount++
+			} else if item.State == ItemStateCheckedOut {
+				itemMap["checked_out_at"] = item.CheckedOutAt.Format(time.RFC3339)
+				checkedOutCount++
+			}
+
+			items = append(items, itemMap)
+		}
+
+		return map[string]interface{}{
+			"items":              items,
+			"total_count":        len(items),
+			"on_shelf_count":     onShelfCount,
+			"checked_out_count":  checkedOutCount,
+		}, nil
+
+	case "checkout_item":
+		itemID, ok := cmd["item_id"].(string)
+		if !ok || itemID == "" {
+			return nil, errors.New("item_id is required and must be a string")
+		}
+
+		s.inventoryMu.Lock()
+
+		item, exists := s.inventory[itemID]
+		if !exists {
+			s.inventoryMu.Unlock()
+			return nil, fmt.Errorf("item with id %s not found", itemID)
+		}
+
+		previousState := item.State
+		now := time.Now()
+		item.State = ItemStateCheckedOut
+		item.CheckedOutAt = now
+		s.inventoryMu.Unlock()
+
+		s.logger.Infof("Checked out item: %s (%s) - %s → %s", itemID, item.ItemName, previousState, ItemStateCheckedOut)
+
+		return map[string]interface{}{
+			"item_id":        itemID,
+			"item_name":      item.ItemName,
+			"state":          string(ItemStateCheckedOut),
+			"checked_out_at": now.Format(time.RFC3339),
+			"previous_state": string(previousState),
+		}, nil
+
+	case "return_item":
+		itemID, ok := cmd["item_id"].(string)
+		if !ok || itemID == "" {
+			return nil, errors.New("item_id is required and must be a string")
+		}
+
+		s.inventoryMu.Lock()
+
+		item, exists := s.inventory[itemID]
+		if !exists {
+			s.inventoryMu.Unlock()
+			return nil, fmt.Errorf("item with id %s not found", itemID)
+		}
+
+		previousState := item.State
+		now := time.Now()
+		item.State = ItemStateOnShelf
+		item.CheckedInAt = now
+		item.CheckedOutAt = time.Time{} // Clear checkout timestamp
+		s.inventoryMu.Unlock()
+
+		s.logger.Infof("Returned item: %s (%s) - %s → %s", itemID, item.ItemName, previousState, ItemStateOnShelf)
+
+		return map[string]interface{}{
+			"item_id":        itemID,
+			"item_name":      item.ItemName,
+			"state":          string(ItemStateOnShelf),
+			"checked_in_at":  now.Format(time.RFC3339),
+			"previous_state": string(previousState),
+		}, nil
+
+	case "remove_item":
+		itemID, ok := cmd["item_id"].(string)
+		if !ok || itemID == "" {
+			return nil, errors.New("item_id is required and must be a string")
+		}
+
+		s.inventoryMu.Lock()
+
+		item, exists := s.inventory[itemID]
+		if !exists {
+			s.inventoryMu.Unlock()
+			return nil, fmt.Errorf("item with id %s not found", itemID)
+		}
+
+		itemName := item.ItemName
+		delete(s.inventory, itemID)
+		s.inventoryMu.Unlock()
+
+		s.logger.Infof("Removed item from inventory: %s (%s)", itemID, itemName)
+
+		return map[string]interface{}{
+			"item_id": itemID,
+			"removed": true,
+			"message": "Item removed from inventory",
+		}, nil
 
 	default:
 		return nil, fmt.Errorf("unknown command: %s", cmdType)
